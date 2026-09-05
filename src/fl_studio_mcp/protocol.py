@@ -209,6 +209,88 @@ REQUEST_ID_ALPHABET = string.ascii_lowercase + string.digits
 # Total header length: 1 (manuf) + 3 (magic) + 1 (dir) + REQUEST_ID_LEN.
 _HEADER_LEN = 1 + 3 + 1 + REQUEST_ID_LEN
 
+# Chunked frames (controller build channels-v42+). Windows/loopMIDI silently
+# drops single SysEx messages over ~1024 bytes (bisected 2026-09-05: 983 B
+# passes, 1023 B fails). A body longer than _MAX_CHUNK_BODY ships as multiple
+# frames whose data (after F0) is: 7E <cont> <seq> <body bytes...>, where
+# cont=1 means more frames follow and seq is the 0-based frame index (7 bits).
+# Bodies that fit stay in the legacy single 7D frame, so any old/new pairing
+# (v41 device <-> v42 server or reverse) keeps working in both directions;
+# only genuinely oversized messages use the new format. 900 B body + 12 B
+# message header + 3 B chunk header + F0/F7 framing = ~918 B on the wire,
+# ~100 B under the measured ceiling. 7E is never byte 0 of a legacy message
+# (manufacturer IDs are 0x00-0x7D), so the two formats are unambiguous.
+CHUNK_MAGIC = 0x7E
+_MAX_CHUNK_BODY = 900
+_CHUNK_HEADER_LEN = 3
+_MAX_REASSEMBLY_BYTES = 65536  # runaway-buffer guard; legit payloads stay far under
+
+
+def encode_frames(direction: int, request_id: str, payload: dict) -> list[bytes]:
+    """Encode a message as one or more SysEx *data* payloads (no F0/F7).
+
+    Returns a list so callers can emit each frame as its own MIDI message.
+    Small payloads yield a single legacy frame; oversized payloads split
+    across chunk frames per the format documented on CHUNK_MAGIC above.
+    """
+    body = encode_message(direction, request_id, payload)
+    if len(body) <= _MAX_CHUNK_BODY:
+        return [body]
+    n = -(-len(body) // _MAX_CHUNK_BODY)  # ceil
+    frames = []
+    for seq in range(n):
+        chunk = body[seq * _MAX_CHUNK_BODY : (seq + 1) * _MAX_CHUNK_BODY]
+        cont = 1 if seq < n - 1 else 0
+        frames.append(bytes([CHUNK_MAGIC, cont, seq & 0x7F]) + chunk)
+    return frames
+
+
+class ChunkReassembler:
+    """Reassemble chunked inbound frames back into the original data payload.
+
+    feed() takes one SysEx data payload (bytes, after F0/F7 are stripped).
+    It returns the fully-assembled payload bytes once the last frame of a
+    message arrives, or None while more frames are still expected (or when
+    the frame is not a chunk frame this reassembler should swallow).
+
+    Legacy single frames pass straight through (returned as-is), so a
+    mixed old/new stream is handled without special-casing.
+    """
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self._expect = 0  # next seq we want within the in-progress message
+
+    def reset(self) -> None:
+        self._buf = bytearray()
+        self._expect = 0
+
+    def feed(self, data: bytes) -> bytes | None:
+        if len(data) < _CHUNK_HEADER_LEN or data[0] != CHUNK_MAGIC:
+            # Legacy / heartbeat / foreign frame: decode path handles it
+            # directly. Do NOT touch the in-progress chunk buffer -- a
+            # heartbeat can legally interleave between frames of a large
+            # multi-frame message (MIDI baud makes one frame ~190 ms).
+            return bytes(data)
+        cont = data[1]
+        seq = data[2]
+        # Out-of-order or gap: a fresh seq==0 restarts cleanly; anything else
+        # mid-stream is unrecoverable on this transport, so drop and resync.
+        if seq != self._expect:
+            self.reset()
+            if seq != 0:
+                return None
+        self._buf.extend(data[_CHUNK_HEADER_LEN:])
+        if len(self._buf) > _MAX_REASSEMBLY_BYTES:
+            self.reset()
+            return None
+        self._expect = (seq + 1) & 0x7F
+        if cont:
+            return None
+        assembled = bytes(self._buf)
+        self.reset()
+        return assembled
+
 
 def new_request_id() -> str:
     return "".join(secrets.choice(REQUEST_ID_ALPHABET) for _ in range(REQUEST_ID_LEN))
