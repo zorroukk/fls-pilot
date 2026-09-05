@@ -122,14 +122,17 @@ def kb_record_finding(
 
 
 def kb_record_verified_finding(json_path: str, new_mapping_entry: str, confidence: str) -> str:
-    """Safely update a structured JSON file (e.g., fl_api/mixer_eq_calibration.json) with a new mapping."""
+    """Safely update a structured JSON file with a new mapping."""
     if confidence not in [
         "implementation_verified",
         "cross_platform_verified",
         "measured_repeated",
         "measured_once",
     ]:
-        return f"Error: Confidence '{confidence}' is too low to update structured machine data directly."
+        return (
+            f"Error: Confidence '{confidence}' is too low to update structured "
+            "machine data directly."
+        )
 
     p = KB_ROOT / json_path
     if not p.exists():
@@ -149,7 +152,10 @@ def kb_record_verified_finding(json_path: str, new_mapping_entry: str, confidenc
             # Simple check to avoid silent overwrite of existing normalized values
             existing = [m.get("normalized") for m in data[0]["mapping"]]
             if new_entry.get("normalized") in existing:
-                return f"Error: Mapping for normalized value {new_entry.get('normalized')} already exists. Manual review required."
+                return (
+                    f"Error: Mapping for normalized value {new_entry.get('normalized')} "
+                    "already exists. Manual review required."
+                )
 
             data[0]["mapping"].append(new_entry)
             p.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -166,10 +172,24 @@ def kb_list_open_questions() -> str:
 
 
 def register(mcp: FastMCP) -> None:
-    mcp.tool()(kb_search)
-    mcp.tool()(kb_get)
-    mcp.tool()(kb_get_parameter_spec)
-    mcp.tool()(kb_get_conversion)
-    mcp.tool()(kb_record_finding)
-    mcp.tool()(kb_record_verified_finding)
-    mcp.tool()(kb_list_open_questions)
+    read_annotations = {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+        "safetyClass": "read-only",
+    }
+    external_write_annotations = {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+        "safetyClass": "external-write",
+    }
+    mcp.tool(annotations=read_annotations)(kb_search)
+    mcp.tool(annotations=read_annotations)(kb_get)
+    mcp.tool(annotations=read_annotations)(kb_get_parameter_spec)
+    mcp.tool(annotations=read_annotations)(kb_get_conversion)
+    mcp.tool(annotations=external_write_annotations)(kb_record_finding)
+    mcp.tool(annotations=external_write_annotations)(kb_record_verified_finding)
+    mcp.tool(annotations=read_annotations)(kb_list_open_questions)

@@ -25,6 +25,7 @@ from fastmcp import FastMCP
 from . import __version__
 from .connection import list_ports
 from .protocol import port_from_fl_name, port_to_fl_name
+from .tool_metadata import SafetyAwareFastMCP
 from .tools import arrange as arrange_tools
 from .tools import audio as audio_tools
 from .tools import batch as batch_tools
@@ -58,15 +59,16 @@ from .tools import transport as transport_tools
 logger = logging.getLogger("fl_studio_mcp")
 
 _LEGACY_LOW_LEVEL_TOOLS = {
-    # Transport one-off aliases. Use fl_transport(action, params).
-    "fl_ping",
-    "fl_get_tempo",
+    # Transport writes and runtime controls stay retired in favor of fl_transport.
+    # The specialized read-only aliases fl_ping, fl_get_tempo, and
+    # fl_get_play_state remain public so clients can build a read-only allowlist
+    # without exposing fl_transport's mutating actions.
     "fl_set_tempo",
     "fl_play",
     "fl_stop",
     "fl_toggle_play",
     "fl_record",
-    "fl_get_play_state",
+
     "fl_get_song_position",
     "fl_set_song_position",
     "fl_get_time_signature",
@@ -191,7 +193,7 @@ clearly rather than retrying.
 
 
 def build_server() -> FastMCP:
-    mcp = FastMCP(
+    mcp = SafetyAwareFastMCP(
         name="fl-studio-mcp",
         version=__version__,
         instructions=SERVER_INSTRUCTIONS,

@@ -50,6 +50,11 @@ Transient runtime controls such as play, stop, and preview note triggering do
 not require project rollback, but they still need safe failure behavior and must
 not leave stuck state behind.
 
+Clients that require a strict read-only surface must be able to allowlist
+specialized read tools without exposing a consolidated tool whose action
+parameter also permits writes or transient controls. Retain narrowly scoped read
+endpoints when they are needed to enforce that boundary at discovery time.
+
 ## Write Tool Requirements
 
 For every new FL-mutating tool, add or update all relevant pieces:
