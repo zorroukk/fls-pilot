@@ -26,14 +26,11 @@ To activate in FL:
 Wire format: see src/fl_studio_mcp/protocol.py.
 
 Dependencies inside FL Studio:
-  - json, base64, binascii (all available -- _json, _codecs, binascii are
-    in FL's built-in module list)
+  - FL's built-in API modules plus built-in math/time
+  - NO base64, contextlib, or json modules (absent in FL Studio 21's embedded Python)
   - NO socket, NO requests, NO pip packages, NO file I/O
 """
 
-import base64
-import contextlib
-import json
 import math
 import time
 
@@ -62,6 +59,258 @@ try:
     import utils
 except Exception:
     utils = None
+
+
+class _suppress:
+    """Small built-in-only replacement for contextlib.suppress."""
+
+    def __init__(self, *exceptions):
+        self._exceptions = exceptions
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return exc_type is not None and issubclass(exc_type, self._exceptions)
+
+
+def _json_escape_string(value):
+    """Encode a string as ensure_ascii=True JSON using built-ins only."""
+    escaped = ['"']
+    short_escapes = {
+        '"': '\\"',
+        "\\": "\\\\",
+        "\b": "\\b",
+        "\f": "\\f",
+        "\n": "\\n",
+        chr(13): chr(92) + "r",
+        "\t": "\\t",
+    }
+    for char in value:
+        replacement = short_escapes.get(char)
+        if replacement is not None:
+            escaped.append(replacement)
+            continue
+        code = ord(char)
+        if code < 0x20 or code > 0x7E:
+            if code <= 0xFFFF:
+                escaped.append("\\u" + format(code, "04x"))
+            else:
+                code -= 0x10000
+                high = 0xD800 + (code >> 10)
+                low = 0xDC00 + (code & 0x3FF)
+                escaped.append("\\u" + format(high, "04x"))
+                escaped.append("\\u" + format(low, "04x"))
+        else:
+            escaped.append(char)
+    escaped.append('"')
+    return "".join(escaped)
+
+
+def _json_dumps(value):
+    """Serialize protocol JSON without relying on FL's absent json module."""
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return _json_escape_string(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value == float("inf") or value == -float("inf"):
+            raise ValueError("non-finite float is not valid protocol JSON")
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_json_dumps(item) for item in value) + "]"
+    if isinstance(value, dict):
+        pairs = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("protocol JSON object keys must be strings")
+            pairs.append(_json_escape_string(key) + ":" + _json_dumps(item))
+        return "{" + ",".join(pairs) + "}"
+    raise TypeError("unsupported protocol JSON value: " + type(value).__name__)
+
+
+class _JSONParser:
+    """Strict built-in-only parser for the JSON values used by the protocol."""
+
+    def __init__(self, text):
+        self.text = text
+        self.pos = 0
+
+    def parse(self):
+        self._skip_space()
+        value = self._parse_value()
+        self._skip_space()
+        if self.pos != len(self.text):
+            raise ValueError("trailing JSON data")
+        return value
+
+    def _skip_space(self):
+        while self.pos < len(self.text) and ord(self.text[self.pos]) in (32, 9, 13, 10):
+            self.pos += 1
+
+    def _parse_value(self):
+        if self.pos >= len(self.text):
+            raise ValueError("expected JSON value")
+        char = self.text[self.pos]
+        if char == '"':
+            return self._parse_string()
+        if char == "{":
+            return self._parse_object()
+        if char == "[":
+            return self._parse_array()
+        if char == "-" or "0" <= char <= "9":
+            return self._parse_number()
+        for literal, value in (("true", True), ("false", False), ("null", None)):
+            if self.text.startswith(literal, self.pos):
+                self.pos += len(literal)
+                return value
+        raise ValueError("invalid JSON value")
+
+    def _parse_string(self):
+        self.pos += 1
+        chars = []
+        escapes = {
+            '"': '"',
+            "\\": "\\",
+            "/": "/",
+            "b": "\b",
+            "f": "\f",
+            "n": "\n",
+            "r": chr(13),
+            "t": "\t",
+        }
+        while self.pos < len(self.text):
+            char = self.text[self.pos]
+            self.pos += 1
+            if char == '"':
+                return "".join(chars)
+            if ord(char) < 0x20:
+                raise ValueError("unescaped control character in JSON string")
+            if char != "\\":
+                chars.append(char)
+                continue
+            if self.pos >= len(self.text):
+                raise ValueError("unterminated JSON escape")
+            escape = self.text[self.pos]
+            self.pos += 1
+            if escape in escapes:
+                chars.append(escapes[escape])
+                continue
+            if escape != "u" or self.pos + 4 > len(self.text):
+                raise ValueError("invalid JSON escape")
+            digits = self.text[self.pos : self.pos + 4]
+            self.pos += 4
+            try:
+                code = int(digits, 16)
+            except ValueError:
+                raise ValueError("invalid JSON unicode escape") from None
+            if 0xD800 <= code <= 0xDBFF and self.text[self.pos : self.pos + 2] == "\\u":
+                low_digits = self.text[self.pos + 2 : self.pos + 6]
+                if len(low_digits) == 4:
+                    try:
+                        low = int(low_digits, 16)
+                    except ValueError:
+                        low = -1
+                    if 0xDC00 <= low <= 0xDFFF:
+                        self.pos += 6
+                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+            chars.append(chr(code))
+        raise ValueError("unterminated JSON string")
+
+    def _parse_array(self):
+        self.pos += 1
+        values = []
+        self._skip_space()
+        if self.pos < len(self.text) and self.text[self.pos] == "]":
+            self.pos += 1
+            return values
+        while True:
+            values.append(self._parse_value())
+            self._skip_space()
+            if self.pos >= len(self.text):
+                raise ValueError("unterminated JSON array")
+            char = self.text[self.pos]
+            self.pos += 1
+            if char == "]":
+                return values
+            if char != ",":
+                raise ValueError("expected comma in JSON array")
+            self._skip_space()
+
+    def _parse_object(self):
+        self.pos += 1
+        result = {}
+        self._skip_space()
+        if self.pos < len(self.text) and self.text[self.pos] == "}":
+            self.pos += 1
+            return result
+        while True:
+            if self.pos >= len(self.text) or self.text[self.pos] != '"':
+                raise ValueError("expected string key in JSON object")
+            key = self._parse_string()
+            self._skip_space()
+            if self.pos >= len(self.text) or self.text[self.pos] != ":":
+                raise ValueError("expected colon in JSON object")
+            self.pos += 1
+            self._skip_space()
+            result[key] = self._parse_value()
+            self._skip_space()
+            if self.pos >= len(self.text):
+                raise ValueError("unterminated JSON object")
+            char = self.text[self.pos]
+            self.pos += 1
+            if char == "}":
+                return result
+            if char != ",":
+                raise ValueError("expected comma in JSON object")
+            self._skip_space()
+
+    def _parse_number(self):
+        start = self.pos
+        if self.text[self.pos] == "-":
+            self.pos += 1
+            if self.pos >= len(self.text):
+                raise ValueError("invalid JSON number")
+        if self.text[self.pos] == "0":
+            self.pos += 1
+        elif "1" <= self.text[self.pos] <= "9":
+            while self.pos < len(self.text) and "0" <= self.text[self.pos] <= "9":
+                self.pos += 1
+        else:
+            raise ValueError("invalid JSON number")
+        if self.pos < len(self.text) and self.text[self.pos] == ".":
+            self.pos += 1
+            fraction_start = self.pos
+            while self.pos < len(self.text) and "0" <= self.text[self.pos] <= "9":
+                self.pos += 1
+            if self.pos == fraction_start:
+                raise ValueError("invalid JSON fraction")
+        if self.pos < len(self.text) and self.text[self.pos] in "eE":
+            self.pos += 1
+            if self.pos < len(self.text) and self.text[self.pos] in "+-":
+                self.pos += 1
+            exponent_start = self.pos
+            while self.pos < len(self.text) and "0" <= self.text[self.pos] <= "9":
+                self.pos += 1
+            if self.pos == exponent_start:
+                raise ValueError("invalid JSON exponent")
+        number = self.text[start : self.pos]
+        if any(marker in number for marker in ".eE"):
+            value = float(number)
+            if value != value or value == float("inf") or value == -float("inf"):
+                raise ValueError("non-finite number is not valid protocol JSON")
+            return value
+        return int(number)
+
+
+def _json_loads(text):
+    return _JSONParser(text).parse()
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +370,7 @@ def OnInit():
             "responses cannot be sent back to the MCP server."
         )
     # Enable track metering
-    with contextlib.suppress(Exception):
+    with _suppress(Exception):
         device.setHasMeters()
     # Send a heartbeat immediately so the server doesn't have to wait.
     _emit_heartbeat()
@@ -213,13 +462,80 @@ def OnRefresh(flags):
 # ---------------------------------------------------------------------------
 
 
+def _b64encode(raw):
+    """Encode bytes without relying on FL's incomplete Python stdlib."""
+    alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    raw = bytes(raw)
+    encoded = bytearray()
+    for offset in range(0, len(raw), 3):
+        chunk = raw[offset : offset + 3]
+        value = chunk[0] << 16
+        if len(chunk) > 1:
+            value |= chunk[1] << 8
+        if len(chunk) > 2:
+            value |= chunk[2]
+
+        encoded.append(alphabet[(value >> 18) & 0x3F])
+        encoded.append(alphabet[(value >> 12) & 0x3F])
+        encoded.append(alphabet[(value >> 6) & 0x3F] if len(chunk) > 1 else 0x3D)
+        encoded.append(alphabet[value & 0x3F] if len(chunk) > 2 else 0x3D)
+    return bytes(encoded)
+
+
+def _b64decode(encoded):
+    """Decode strict RFC 4648 Base64 without importing the base64 module."""
+    alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    encoded = bytes(encoded)
+    if len(encoded) % 4:
+        raise ValueError("invalid Base64 length")
+
+    decoded = bytearray()
+    for offset in range(0, len(encoded), 4):
+        chunk = encoded[offset : offset + 4]
+        final_chunk = offset + 4 == len(encoded)
+        if chunk[0] == 0x3D or chunk[1] == 0x3D:
+            raise ValueError("invalid Base64 padding")
+        if chunk[2] == 0x3D and (chunk[3] != 0x3D or not final_chunk):
+            raise ValueError("invalid Base64 padding")
+        if chunk[3] == 0x3D and not final_chunk:
+            raise ValueError("invalid Base64 padding")
+
+        values = []
+        for char in chunk:
+            if char == 0x3D:
+                values.append(0)
+                continue
+            value = alphabet.find(bytes([char]))
+            if value < 0:
+                raise ValueError("invalid Base64 character")
+            values.append(value)
+
+        if chunk[2] == 0x3D and values[1] & 0x0F:
+            raise ValueError("non-canonical Base64 pad bits")
+        if chunk[3] == 0x3D and chunk[2] != 0x3D and values[2] & 0x03:
+            raise ValueError("non-canonical Base64 pad bits")
+
+        packed = (
+            (values[0] << 18)
+            | (values[1] << 12)
+            | (values[2] << 6)
+            | values[3]
+        )
+        decoded.append((packed >> 16) & 0xFF)
+        if chunk[2] != 0x3D:
+            decoded.append((packed >> 8) & 0xFF)
+        if chunk[3] != 0x3D:
+            decoded.append(packed & 0xFF)
+    return bytes(decoded)
+
+
 def _encode_message(direction, request_id, payload):
     # Returns the SysEx bytes WITHOUT F0/F7 framing (caller adds them).
     rid = request_id.encode("ascii")
     if len(rid) != REQUEST_ID_LEN:
         rid = (rid + b"00000000")[:REQUEST_ID_LEN]
-    body_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    body_b64 = base64.b64encode(body_json.encode("ascii"))
+    body_json = _json_dumps(payload)
+    body_b64 = _b64encode(body_json.encode("ascii"))
     out = bytearray()
     out.append(SYSEX_MANUFACTURER)
     out.append(SYSEX_MAGIC[0])
@@ -245,8 +561,10 @@ def _decode_message(data):
         return None
     body = data[_HEADER_LEN:]
     try:
-        body_json = base64.b64decode(bytes(body)).decode("utf-8")
-        payload = json.loads(body_json)
+        body_json = _b64decode(bytes(body)).decode("utf-8")
+        payload = _json_loads(body_json)
+        if not isinstance(payload, dict):
+            return None
     except Exception:
         return None
     return direction, request_id, payload
@@ -302,7 +620,7 @@ def _h_ping(params):
     return {
         "fl_version": _fl_version,
         "protocol_version": PROTOCOL_VERSION,
-        "build": "channels-v39",  # reload marker -- bump to verify reloads take
+        "build": "channels-v41",  # reload marker -- bump to verify reloads take
         "ts": time.time(),
     }
 
@@ -431,11 +749,7 @@ def _paginate(total, start, entry_fn, key):
         out.append(entry_fn(i))
         i += 1
         nxt = i if i < total else None
-        size = len(
-            json.dumps(
-                {"total": total, "start": start, "next_start": nxt, key: out}, separators=(",", ":")
-            )
-        )
+        size = len(_json_dumps({"total": total, "start": start, "next_start": nxt, key: out}))
         if size > _LIST_BUDGET and len(out) > 1:
             out.pop()  # this entry overflowed the page -> next page
             i -= 1
@@ -973,7 +1287,7 @@ def _h_plugin_get_params(p):
                 "s": (plugins.getParamValueString(cur, track, slot) or "")[:16],
             }
         )
-        if len(json.dumps(out, separators=(",", ":"))) > 480:
+        if len(_json_dumps(out)) > 480:
             break
     return {
         "track": track,
@@ -1248,7 +1562,7 @@ def _h_api_probe(p):
         while i < len(names):
             out.append(names[i])
             i += 1
-            if len(json.dumps(out, separators=(",", ":"))) > 600 and len(out) > 1:
+            if len(_json_dumps(out)) > 600 and len(out) > 1:
                 out.pop()
                 i -= 1
                 break
@@ -1423,7 +1737,7 @@ def _h_ensure_piano_roll(p):
                 visible = False
             ui.openEventEditor(event_id, editor, 0 if visible else 1)
             if wid is not None and hasattr(ui, "setFocused"):
-                with contextlib.suppress(Exception):
+                with _suppress(Exception):
                     ui.setFocused(wid)
             out.update(
                 {
@@ -1528,6 +1842,11 @@ def _h_channel_get_steps(p):
     p_release = getattr(midi, "pRelease", None)
     p_modx = getattr(midi, "pModX", None)
     p_pitch = getattr(midi, "pPitch", None) or getattr(midi, "pFinePitch", None)
+    if patterns.patternCount() < 1:
+        raise _ClientError("project has no patterns; open a project that has one")
+    _pat = int(patterns.patternNumber())
+    if _pat < 1:
+        _pat = 1
     try:
         for s in range(steps):
             try:
@@ -1537,35 +1856,35 @@ def _h_channel_get_steps(p):
             grid.append(g)
 
             try:
-                raw_v = channels.getStepParam(idx, s, midi.pVelocity, 0, 0)
+                raw_v = channels.getStepParam(idx, _pat, s, midi.pVelocity, 0, 0)
                 v = round(float(raw_v) / 127.0, 4)
             except Exception:
                 v = 0.8
             vel.append(v)
 
             try:
-                raw_pan = channels.getStepParam(idx, s, midi.pPan, 0, 0)
+                raw_pan = channels.getStepParam(idx, _pat, s, midi.pPan, 0, 0)
                 pn = round(float(raw_pan) / 64.0 - 1.0, 4)
             except Exception:
                 pn = 0.0
             pan.append(pn)
 
             try:
-                raw_shift = channels.getStepParam(idx, s, midi.pShift, 0, 0)
+                raw_shift = channels.getStepParam(idx, _pat, s, midi.pShift, 0, 0)
                 sh = round(float(raw_shift) / 240.0, 4)
             except Exception:
                 sh = 0.0
             shift.append(sh)
 
             try:
-                rp = int(channels.getStepParam(idx, s, midi.pRepeat, 0, 0))
+                rp = int(channels.getStepParam(idx, _pat, s, midi.pRepeat, 0, 0))
             except Exception:
                 rp = 0
             rep.append(rp)
 
             if p_release is not None:
                 try:
-                    raw_rel = channels.getStepParam(idx, s, p_release, 0, 0)
+                    raw_rel = channels.getStepParam(idx, _pat, s, p_release, 0, 0)
                     rel.append(round(float(raw_rel) / 127.0, 4))
                 except Exception:
                     rel.append(0.0)
@@ -1574,7 +1893,7 @@ def _h_channel_get_steps(p):
 
             if p_modx is not None:
                 try:
-                    raw_modx = channels.getStepParam(idx, s, p_modx, 0, 0)
+                    raw_modx = channels.getStepParam(idx, _pat, s, p_modx, 0, 0)
                     modx.append(round(float(raw_modx) / 255.0, 4))
                 except Exception:
                     modx.append(0.0)
@@ -1583,7 +1902,7 @@ def _h_channel_get_steps(p):
 
             if p_pitch is not None:
                 try:
-                    raw_pitch = channels.getStepParam(idx, s, p_pitch, 0, 0)
+                    raw_pitch = channels.getStepParam(idx, _pat, s, p_pitch, 0, 0)
                     pitch.append(int(raw_pitch))
                 except Exception:
                     pitch.append(0)
@@ -1609,7 +1928,8 @@ def _h_channel_get_steps(p):
         }
     finally:
         if previous_pattern is not None and previous_pattern != patterns.patternNumber():
-            patterns.jumpToPattern(previous_pattern)
+            with _suppress(Exception):
+                patterns.jumpToPattern(previous_pattern)
 
 
 def _h_pattern_get(p):
@@ -1772,7 +2092,7 @@ def _h_mixer_get_slot(p):
     mute_fn = getattr(plugins, "getPluginMuteState", None)
     enabled = True
     if mute_fn is not None:
-        with contextlib.suppress(Exception):
+        with _suppress(Exception):
             enabled = not bool(mute_fn(track, slot))
     return {
         "track": track,
@@ -2144,7 +2464,7 @@ def _h_channel_set_steps(p):
                     except Exception as e:
                         failures.append({"step": step_idx, "param": "pitch", "error": str(e)})
 
-        with contextlib.suppress(Exception):
+        with _suppress(Exception):
             channels.updateGraphEditor()
         out = _h_channel_get_steps({"channel": idx, "pattern": target_pattern})
         if failures:
@@ -2157,7 +2477,6 @@ def _h_channel_set_steps(p):
 
 _HANDLERS = {
     "ping": _h_ping,
-    "bridge_eval": lambda p: {"result": str(eval(p.get("expr", "")))},
     "get_tempo": _h_get_tempo,
     "set_tempo": _h_set_tempo,
     "general_undo": _h_general_undo,

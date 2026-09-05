@@ -1,0 +1,9 @@
+{
+ "id": "fl_unfocused_synth_hotkeys_ignored",
+ "topic": "known_pitfalls",
+ "title": "Synthetic hotkeys ignored while FL unfocused",
+ "confidence_level": "measured_once",
+ "date": "2026-09-04",
+ "source": "persistence-pass evidence-report",
+ "rule": "Use user-initiated or foreground-delivered saves; verify via file hash."
+}
