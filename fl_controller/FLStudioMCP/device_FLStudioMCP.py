@@ -674,7 +674,7 @@ def _h_ping(params):
     return {
         "fl_version": _fl_version,
         "protocol_version": PROTOCOL_VERSION,
-        "build": "channels-v42",  # reload marker -- bump to verify reloads take
+        "build": "channels-v43",  # reload marker -- bump to verify reloads take
         "ts": time.time(),
     }
 
@@ -1896,6 +1896,7 @@ def _h_channel_get_steps(p):
     p_release = getattr(midi, "pRelease", None)
     p_modx = getattr(midi, "pModX", None)
     p_pitch = getattr(midi, "pPitch", None) or getattr(midi, "pFinePitch", None)
+    p_repeat = getattr(midi, "pRepeat", None)
     if patterns.patternCount() < 1:
         raise _ClientError("project has no patterns; open a project that has one")
     _pat = int(patterns.patternNumber())
@@ -1930,10 +1931,13 @@ def _h_channel_get_steps(p):
                 sh = 0.0
             shift.append(sh)
 
-            try:
-                rp = int(channels.getStepParam(idx, _pat, s, midi.pRepeat, 0, 0))
-            except Exception:
-                rp = 0
+            if p_repeat is not None:
+                try:
+                    rp = int(channels.getStepParam(idx, _pat, s, p_repeat, 0, 0))
+                except Exception:
+                    rp = 0
+            else:
+                rp = None
             rep.append(rp)
 
             if p_release is not None:
@@ -1978,6 +1982,7 @@ def _h_channel_get_steps(p):
                 "release": bool(p_release is not None),
                 "mod": bool(p_modx is not None),
                 "pitch": bool(p_pitch is not None),
+                "repeat": bool(p_repeat is not None),
             },
         }
     finally:
@@ -2443,6 +2448,7 @@ def _h_channel_set_steps(p):
     p_release = getattr(midi, "pRelease", None)
     p_modx = getattr(midi, "pModX", None)
     p_pitch = getattr(midi, "pPitch", None) or getattr(midi, "pFinePitch", None)
+    p_repeat = getattr(midi, "pRepeat", None)
     try:
         for s_info in steps_list:
             step_idx = int(s_info["step"])
@@ -2477,12 +2483,15 @@ def _h_channel_set_steps(p):
 
             if "repeat" in s_info and s_info["repeat"] is not None:
                 rep = max(0, min(15, int(s_info["repeat"])))
-                try:
-                    channels.setStepParameterByIndex(
-                        idx, pat_idx, step_idx, midi.pRepeat, rep, True
-                    )
-                except Exception as e:
-                    failures.append({"step": step_idx, "param": "repeat", "error": str(e)})
+                if p_repeat is None:
+                    failures.append({"step": step_idx, "param": "repeat", "error": "unsupported"})
+                else:
+                    try:
+                        channels.setStepParameterByIndex(
+                            idx, pat_idx, step_idx, p_repeat, rep, True
+                        )
+                    except Exception as e:
+                        failures.append({"step": step_idx, "param": "repeat", "error": str(e)})
 
             if "release" in s_info and s_info["release"] is not None:
                 if p_release is None:
