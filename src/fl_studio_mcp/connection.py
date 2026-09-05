@@ -131,6 +131,7 @@ class FLBridge:
         self._pending: dict[str, _Slot] = {}
         self._last_heartbeat: float = 0.0
         self._heartbeat_payload: dict | None = None
+        self._reassembler = protocol.ChunkReassembler()
 
         self._out_port = None
         self._in_port = None
@@ -225,15 +226,14 @@ class FLBridge:
 
         request_id = protocol.new_request_id()
         request = protocol.make_request(command, params)
-        encoded = protocol.encode_message(DIR_REQUEST, request_id, request)
 
         slot = _Slot()
         with self._lock:
             self._pending[request_id] = slot
 
         try:
-            msg = mido.Message("sysex", data=encoded)
-            self._out_port.send(msg)
+            for frame in protocol.encode_frames(DIR_REQUEST, request_id, request):
+                self._out_port.send(mido.Message("sysex", data=frame))
             if not slot.event.wait(timeout or self.default_timeout):
                 raise FLTimeout(
                     f"FL Studio did not respond to {command!r} within "
@@ -305,7 +305,13 @@ class FLBridge:
         """Called from a background MIDI thread."""
         if msg.type != "sysex":
             return
-        decoded = protocol.decode_message(msg.data)
+        # v42: feed raw frames through the chunk reassembler first. Legacy
+        # and heartbeat frames pass straight through; chunk frames return
+        # None until the message is complete (heartbeats may interleave).
+        data = self._reassembler.feed(bytes(msg.data))
+        if data is None:
+            return
+        decoded = protocol.decode_message(data)
         if decoded is None:
             return  # Not one of ours -- ignore.
         direction, request_id, payload = decoded

@@ -329,6 +329,17 @@ DIR_HEARTBEAT = 0x03
 REQUEST_ID_LEN = 8
 _HEADER_LEN = 1 + 3 + 1 + REQUEST_ID_LEN
 
+# Chunked responses (v42). Windows/loopMIDI silently drops single SysEx
+# messages over ~1024 bytes (bisected 2026-09-05: 983 B passes, 1023 B fails).
+# Bodies longer than _MAX_CHUNK_BODY ship as multiple frames prefixed
+# 7E <cont> <seq>; bodies that fit stay in the legacy 7D format unchanged, so
+# new-device<->old-server and old-device<->new-server keep working as today.
+# Header is 13 B before the body; 900 leaves ~100 B safety margin under the
+# ceiling. 7E never appears as byte 0 of a legacy message (manufacturers are
+# 0x00-0x7D), so receivers can tell the formats apart unambiguously.
+CHUNK_MAGIC = 0x7E
+_MAX_CHUNK_BODY = 900
+
 HEARTBEAT_INTERVAL = 0.5  # seconds between heartbeats
 
 
@@ -338,6 +349,14 @@ HEARTBEAT_INTERVAL = 0.5  # seconds between heartbeats
 
 _last_heartbeat = 0.0
 _fl_version = "unknown"
+
+# Inbound chunk reassembly (server -> device requests split by the same
+# frame-ceiling rule as responses). Single buffer: our peer sends one
+# message's frames back-to-back, and a stray/unexpected chunk only ever
+# corrupts the current request (caller sees a timeout and retries).
+_rx_buf = bytearray()
+_rx_expect = 0  # next seq wanted in the in-progress message
+_MAX_RX_BYTES = 65536  # runaway-buffer guard
 
 # `device.midiOutSysex` is what we want; some old builds expose
 # `midiOutSysEx` (capital E). Resolve at OnInit.
@@ -413,7 +432,30 @@ def _handle_request_sysex(event, source):
     if len(raw) >= 1 and raw[-1] == 0xF7:
         raw = raw[:-1]
 
-    decoded = _decode_message(raw)
+    # Chunked inbound frame: 7E <cont> <seq> <body...>
+    if len(raw) >= 3 and raw[0] == CHUNK_MAGIC:
+        global _rx_buf, _rx_expect
+        cont = raw[1]
+        seq = raw[2]
+        if seq != _rx_expect:
+            _rx_buf = bytearray()  # gap/retransmit -> resync
+            _rx_expect = 0
+            if seq != 0:
+                return True
+        _rx_buf.extend(raw[3:])
+        if len(_rx_buf) > _MAX_RX_BYTES:
+            _rx_buf = bytearray()
+            _rx_expect = 0
+            return True
+        if cont:
+            _rx_expect = (seq + 1) & 0x7F
+            return True  # ours, but the message is not complete yet
+        assembled = bytes(_rx_buf)
+        _rx_buf = bytearray()
+        _rx_expect = 0
+        decoded = _decode_message(assembled)
+    else:
+        decoded = _decode_message(raw)
     if decoded is None:
         # Not ours -- let FL keep processing as it would normally.
         return False
@@ -574,11 +616,23 @@ def _send_message(direction, request_id, payload):
     if _send_sysex_fn is None:
         return
     body = _encode_message(direction, request_id, payload)
-    framed = bytes([0xF0]) + body + bytes([0xF7])
-    try:
-        _send_sysex_fn(framed)
-    except Exception as e:
-        print(f"[FLStudioMCP] midiOutSysex failed: {e}")
+    if len(body) <= _MAX_CHUNK_BODY:
+        frames = [bytes([0xF0]) + body + bytes([0xF7])]
+    else:
+        n = (len(body) + _MAX_CHUNK_BODY - 1) // _MAX_CHUNK_BODY
+        frames = []
+        for seq in range(n):
+            chunk = body[seq * _MAX_CHUNK_BODY : (seq + 1) * _MAX_CHUNK_BODY]
+            cont = 1 if seq < n - 1 else 0
+            frames.append(
+                bytes([0xF0, CHUNK_MAGIC, cont, seq & 0x7F]) + chunk + bytes([0xF7])
+            )
+    for framed in frames:
+        try:
+            _send_sysex_fn(framed)
+        except Exception as e:
+            print(f"[FLStudioMCP] midiOutSysex failed: {e}")
+            return
 
 
 def _emit_heartbeat():
@@ -620,7 +674,7 @@ def _h_ping(params):
     return {
         "fl_version": _fl_version,
         "protocol_version": PROTOCOL_VERSION,
-        "build": "channels-v41",  # reload marker -- bump to verify reloads take
+        "build": "channels-v42",  # reload marker -- bump to verify reloads take
         "ts": time.time(),
     }
 
