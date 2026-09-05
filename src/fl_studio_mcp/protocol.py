@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import platform
 import secrets
@@ -38,7 +39,7 @@ PROTOCOL_VERSION = 2
 HEARTBEAT_STALE_SECONDS = 3.0
 
 # Server-side timeout for any single command round trip.
-DEFAULT_TIMEOUT_SECONDS = 5.0
+DEFAULT_TIMEOUT_SECONDS = 15.0
 
 # How often the FL controller emits a heartbeat SysEx.
 HEARTBEAT_INTERVAL_SECONDS = 0.5
@@ -213,6 +214,17 @@ def new_request_id() -> str:
     return "".join(secrets.choice(REQUEST_ID_ALPHABET) for _ in range(REQUEST_ID_LEN))
 
 
+def _reject_json_constant(value: str):
+    raise ValueError(f"Non-finite JSON constant is not allowed: {value}")
+
+
+def _parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"Non-finite JSON number is not allowed: {value}")
+    return parsed
+
+
 def encode_message(direction: int, request_id: str, payload: dict) -> bytes:
     """Build the SysEx payload bytes (everything between F0 and F7).
 
@@ -223,8 +235,10 @@ def encode_message(direction: int, request_id: str, payload: dict) -> bytes:
     rid = request_id.encode("ascii")
     if len(rid) != REQUEST_ID_LEN or any(b > 0x7F for b in rid):
         raise ValueError(f"Bad request id: {request_id!r}")
+    if not isinstance(payload, dict):
+        raise ValueError("Protocol payload must be a dictionary")
 
-    body_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    body_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
     body_b64 = base64.b64encode(body_json.encode("ascii"))
 
     out = bytearray()
@@ -253,8 +267,17 @@ def decode_message(data) -> tuple[int, str, dict] | None:
     rid = buf[5 : 5 + REQUEST_ID_LEN].decode("ascii", errors="replace")
     body = buf[_HEADER_LEN:]
     try:
-        body_json = base64.b64decode(body, validate=True).decode("utf-8")
-        payload = json.loads(body_json)
+        decoded_body = base64.b64decode(body, validate=True)
+        if base64.b64encode(decoded_body) != body:
+            return None
+        body_json = decoded_body.decode("utf-8")
+        payload = json.loads(
+            body_json,
+            parse_constant=_reject_json_constant,
+            parse_float=_parse_finite_json_float,
+        )
+        if not isinstance(payload, dict):
+            return None
     except Exception:
         return None
     return direction, rid, payload
