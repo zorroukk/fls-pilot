@@ -123,21 +123,25 @@ Not currently supported:
   possible track, verify count/readback, restore/delete/undo immediately, and
   record the exact FL build and rollback result before promoting the capability.
 
-The current baseline, regenerated on 2026-06-07, reports:
+The current baseline, regenerated on 2026-09-04, reports:
 
-- 87 registered public FastMCP tools with 87 unique public names after v2.0
-  legacy low-level alias removal.
+- 90 registered public FastMCP tools with 90 unique public names.
 - 166 statically audited tool definitions.
 - 33 registered `write-safe` tools.
 - 0 `write-gap` tools.
-- 41 registered `read-only` tools.
+- 49 registered `read-only` tools.
 - 4 `server-state` tools.
-- 2 `external-write` tools.
+- 4 `external-write` tools.
 - 7 registered tools are not covered by the static AST audit because they are
-  registered via direct `mcp.tool()(fn)` calls without safety annotations.
-- 86 statically audited legacy low-level tool definitions remain in source for
+  registered dynamically via direct `mcp.tool()(fn)` calls; their expected and
+  runtime safety classes are explicitly validated by the registration checker.
+- 83 statically audited legacy low-level tool definitions remain in source for
   helper/test compatibility but are intentionally absent from public
   registration.
+- `fl_ping`, `fl_get_tempo`, and `fl_get_play_state` remain public read-only
+  endpoints for client-side allowlists. Their adjacent write/transient aliases
+  stay retired, so a client need not expose `fl_transport` merely to read health,
+  tempo, or transport state.
 
 `--fail-on-gaps` is the current no-regression gate.
 `scripts/check_tool_registration_baseline.py` is the registration baseline
@@ -184,7 +188,10 @@ registry-built protocol payloads, and routes persistent transport writes through
 `safety.safe_write` with the same rollback/readback behavior as the legacy
 transport tools. Legacy transport tools were retained during the shadow phase;
 as of 2026-06-05, `fl_transport` also exposes `ping` and the legacy transport
-aliases are no longer registered.
+write/transient aliases are no longer registered. As of 2026-09-04, the three
+specialized read-only aliases `fl_ping`, `fl_get_tempo`, and
+`fl_get_play_state` are retained for strict client allowlisting; this does not
+add a new FL API capability.
 
 The additive `fl_mixer` and `fl_channel` domain tools were added on
 2026-06-04 for v2.0 domain-tool parity testing. They validate actions through

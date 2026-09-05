@@ -14,19 +14,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from audit_tool_safety import TOOLS_DIR, audit_file, count_by_status  # noqa: E402
+from audit_tool_safety import (  # noqa: E402
+    TOOLS_DIR,
+    _expected_safety_class,
+    audit_file,
+    count_by_status,
+)
 from fastmcp import FastMCP  # noqa: E402
 
 from fl_studio_mcp import __version__  # noqa: E402
 from fl_studio_mcp import server as server_module  # noqa: E402
 
-EXPECTED_REGISTERED_TOOL_COUNT = 87
+EXPECTED_REGISTERED_TOOL_COUNT = 90
 EXPECTED_STATIC_TOOL_COUNT = 166
 EXPECTED_REGISTERED_SAFETY_SUMMARY = {
-    "external-write": 2,
-    "read-only": 41,
+    "external-write": 4,
+    "read-only": 49,
     "server-state": 4,
-    "unannotated": 7,
     "write-safe": 33,
 }
 EXPECTED_STATIC_SAFETY_SUMMARY = {
@@ -36,6 +40,15 @@ EXPECTED_STATIC_SAFETY_SUMMARY = {
     "transient": 5,
     "write-gap": 0,
     "write-safe": 84,
+}
+EXPECTED_DYNAMIC_SAFETY_CLASSES = {
+    "kb_get": "read-only",
+    "kb_get_conversion": "read-only",
+    "kb_get_parameter_spec": "read-only",
+    "kb_list_open_questions": "read-only",
+    "kb_record_finding": "external-write",
+    "kb_record_verified_finding": "external-write",
+    "kb_search": "read-only",
 }
 
 
@@ -109,9 +122,39 @@ def _static_audits():
 
 
 def _safety_class(tool) -> str:
-    annotations = getattr(tool, "annotations", None)
-    safety_class = getattr(annotations, "safetyClass", None)
+    meta = tool.to_mcp_tool().meta or {}
+    safety_class = meta.get("safetyClass")
     return str(safety_class or "unannotated")
+
+
+def _expected_safety_by_name(static_audits, registered_names: set[str]) -> dict[str, str]:
+    expected = {
+        audit.name: _expected_safety_class(audit.status)
+        for audit in static_audits
+        if audit.name in registered_names
+    }
+    expected.update(EXPECTED_DYNAMIC_SAFETY_CLASSES)
+    return expected
+
+
+def _runtime_safety_by_name(registered_tools) -> dict[str, str]:
+    return {tool.name: _safety_class(tool) for tool in registered_tools}
+
+
+def _classification_mismatches(
+    expected: dict[str, str], runtime: dict[str, str]
+) -> list[str]:
+    mismatches: list[str] = []
+    for name in sorted(expected.keys() | runtime.keys()):
+        if name not in expected:
+            mismatches.append(f"{name}: unexpected runtime tool ({runtime[name]!r})")
+        elif name not in runtime:
+            mismatches.append(f"{name}: missing runtime tool (expected {expected[name]!r})")
+        elif expected[name] != runtime[name]:
+            mismatches.append(
+                f"{name}: expected {expected[name]!r}, runtime {runtime[name]!r}"
+            )
+    return mismatches
 
 
 def _print_summary(title: str, counts: dict[str, int]) -> None:
@@ -148,6 +191,11 @@ def main() -> int:
 
     static_audits = _static_audits()
     static_names = {audit.name for audit in static_audits}
+    expected_safety_by_name = _expected_safety_by_name(static_audits, registered_name_set)
+    runtime_safety_by_name = _runtime_safety_by_name(registered_tools)
+    classification_mismatches = _classification_mismatches(
+        expected_safety_by_name, runtime_safety_by_name
+    )
     static_summary = {"write-gap": 0, **count_by_status(static_audits)}
     registered_not_static = sorted(registered_name_set - static_names)
     static_not_registered = sorted(static_names - registered_name_set)
@@ -189,6 +237,11 @@ def main() -> int:
         for name in static_not_registered:
             print(f"- {name}")
         print()
+    if classification_mismatches:
+        print("Per-tool safety classification mismatches")
+        for mismatch in classification_mismatches:
+            print(f"- {mismatch}")
+        print()
 
     checks = {
         "registered tool count matches baseline": len(registered_tools)
@@ -202,6 +255,13 @@ def main() -> int:
         == expected_static_not_registered,
         "duplicate module registration does not affect public names": registered_name_set
         == deduped_names,
+        "per-tool safety classifications match static expectations": not classification_mismatches,
+        "dynamic KB tools are explicitly handled": {
+            name: runtime_safety_by_name[name]
+            for name in EXPECTED_DYNAMIC_SAFETY_CLASSES
+            if name in runtime_safety_by_name
+        }
+        == EXPECTED_DYNAMIC_SAFETY_CLASSES,
     }
     failed = [name for name, ok in checks.items() if not ok]
     print("Checks")
