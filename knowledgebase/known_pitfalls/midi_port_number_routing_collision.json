@@ -1,0 +1,21 @@
+{
+  "date": "2026-09-04",
+  "agent_author": "Hermes flstudio integration agent",
+  "topic": "MIDI port-number routing collision hijacks controller-to-server SysEx in FL 21.2.2",
+  "affected_file_api": "fl_controller/FLStudioMCP/device_FLStudioMCP.py (OnIdle heartbeat, device.midiOutSysex); FL Studio Options > MIDI settings",
+  "context": "After a clean FL restart with correct 'init ok' + '[FLStudioMCP] Ready' banner and no warnings, the daemon received zero heartbeats; both loopMIDI ports existed exactly once.",
+  "observation": "The OUTPUT row 'FLStudioMCP RX' also carried Port 42 (same as 'FLStudioMCP TX'). Raw loopMIDI taps showed valid heartbeat SysEx (dir=3, MCP magic, 2/sec per HEARTBEAT_INTERVAL=0.5) arriving on the RX loopback instead of TX. midiOutSysex selects an output row by port number and matched RX first.",
+  "tested_values": "Output FLStudioMCP RX Port 42 -> 10 (unique); TX output stays 42; RX input enabled with controller FLStudioMCP on 42; script reloaded.",
+  "result": "fl_ping alive=true, heartbeat_age 0.28s; all four read-only gate tools returned live data on first call.",
+  "confidence_level": "measured_repeated",
+  "source_method": "Raw mido taps on both loopMIDI ports decoded via fl_studio_mcp.protocol, then end-to-end MCP calls through the registered Hermes flstudio server.",
+  "reproduction_steps": "Give two FL OUTPUT rows the same Port number, one named like the controller RX; heartbeats vanish from TX and appear on the RX loopback input.",
+  "known_pitfalls": [
+    "The controller port number (42) must appear EXACTLY ONCE in the FL Output section, on FLStudioMCP TX, matching the controller INPUT row number.",
+    "FL 21.2.2 MIDI settings lists Outputs ABOVE Inputs; table confusion is common.",
+    "MIDI bindings are not persisted reliably across FL restarts: recheck input enable, controller assignment, and port numbers after every restart.",
+    "A 'Ready' banner proves neither routing nor daemon pairing; prove pairing via heartbeat age on the wire."
+  ],
+  "open_questions": "Why FL 21.2.2 assigned the RX output row 42 on that restart (auto-numbering vs leftover state) is untested.",
+  "next_recommended_action": "Add startup checklist (input row enabled + controller assigned + unique output port number) to agent onboarding docs; consider daemon-side alert when heartbeats are absent >30s."
+}
