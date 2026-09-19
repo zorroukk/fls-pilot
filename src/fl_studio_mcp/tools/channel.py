@@ -38,7 +38,8 @@ def register(mcp: FastMCP) -> None:
             Field(
                 description=(
                     "Channel action: list, get, get_selected, get_steps, classify, "
-                    "select, set_color, set_mute, set_mixer_target, set_name, set_pan, "
+                    "preview_note, select, set_color, set_mute, "
+                    "set_mixer_target, set_name, set_pan, "
                     "set_solo, set_steps, set_volume."
                 )
             ),
@@ -53,6 +54,10 @@ def register(mcp: FastMCP) -> None:
                     "  get_selected: {}\n"
                     "  get_steps: {channel: int, steps: int (1-64), pattern: int|null}\n"
                     "  classify: {}\n"
+                    "  preview_note: {channel: int, note: int 0-127, "
+                    "velocity: int 1-127 (default 96), "
+                    "hold_ms: int 10-10000 (default 200)} -- "
+                    "transient audition, auto note-off device-side\n"
                     "  select: {channel: int}\n"
                     "  set_color: {channel: int, color: int} or {channel, r, g, b}\n"
                     "  set_mute: {channel: int, state: bool}\n"
@@ -71,7 +76,8 @@ def register(mcp: FastMCP) -> None:
         Read-only actions call the bridge after registry validation.
         Persistent writes (name, volume, pan, mute, solo, color, mixer_target,
         steps, select) use the safety layer: snapshot -> write -> readback
-        -> changelog -> rollback restore.
+        -> changelog -> rollback restore. preview_note is a transient
+        audition control (no project mutation, device-side auto-release).
 
         The ``list`` action is paginated automatically so all channels are
         returned in a single response regardless of channel count.
@@ -115,6 +121,9 @@ def register(mcp: FastMCP) -> None:
                 bridge,
                 **prepared.safe_write_kwargs(tool=f"channel_{prepared.action}"),
             )
+
+        if prepared.safety_class == "transient":
+            return _bridge_call(bridge, prepared.command.command, prepared.command.params)
 
         if prepared.safety_class == "read-only":
             if action == "list":

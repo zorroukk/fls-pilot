@@ -56,7 +56,8 @@ def register(mcp: FastMCP) -> None:
                 description=(
                     "Transport action: ping, get_tempo, set_tempo, get_play_state, "
                     "play, stop, toggle_play, record, get_song_position, set_song_position, "
-                    "get_time_signature, or set_time_signature."
+                    "get_time_signature, set_time_signature, or "
+                    "set_loop_mode: {mode: 'pattern'|'song'}."
                 )
             ),
         ],
@@ -70,8 +71,9 @@ def register(mcp: FastMCP) -> None:
         Read-only actions call the bridge after registry validation. Persistent
         writes, currently tempo and time signature, use the safety layer:
         snapshot -> write -> readback -> changelog -> rollback restore. Runtime
-        controls such as play, stop, record, and song-position moves are
-        transient and do not persist project state.
+        controls such as play, stop, record, song-position moves, loop-mode
+        toggles, and channel preview notes are transient and do not persist
+        project state.
 
         Safety: Write-Safe with Rollback for persistent writes; Transient
         Runtime Control for playback controls; Read-Only for transport reads.

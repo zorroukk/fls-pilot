@@ -665,6 +665,18 @@ Safety requirement:
   playlist, or delete regions through UI automation.
 - Direct region/sample edits need full restore data before becoming tools.
 
+### Live Audition Pack (added 2026-09-19, from karl-andres lineage audit)
+- `channel.preview_note` -> `channels.midiNoteOn` (+ `midiNoteOff` or velocity-0 release
+  via OnIdle). Evidence: documented-unconfirmed on FL 21.2.2 -- handler probe-guards both
+  names and fails `api_unavailable` before mutating. Transient control: no project rollback
+  required per safety contract; device-side release bounds stuck-state even if the server dies.
+- `mixer.set_arm` -> `mixer.armTrack`/`isTrackArmed`. Persistent track flag -> write-safe path,
+  scope `mixer_track:N`, restore from snapshot `arm` field, verify retry via toggle re-issue
+  (same coalescing workaround as mute/solo). Guarded: absent API fails BEFORE mutation.
+- `transport.set_loop_mode` -> `transport.getLoopMode`/`setLoopMode` (bare toggle). Transient
+  (matches set_song_position precedent). The 0/1 -> pattern/song mapping is assumed from the
+  karl-andres/calvinw lineage and MUST be confirmed live on 21.2.2 before raising evidence.
+
 ## Probe-Needed or Limited Areas
 
 | Area | Current result | Allowed next step |
