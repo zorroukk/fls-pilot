@@ -1,5 +1,6 @@
 {
   "date": "2026-09-19",
+  "updated": "2026-09-20",
   "author": "Hermes experimental profile / Nicholas",
   "topic": "Live Audition APIs availability matrix",
   "affected_api": [
@@ -7,36 +8,36 @@
     "CMD_MIXER_SET_ARM",
     "CMD_TRANSPORT_SET_LOOP_MODE"
   ],
-  "confidence_level": "hypothesis",
+  "confidence_level": "measured_once",
   "target_build": "FL Producer Edition v21.2.2 build 3914, controller channels-v44",
-  "source": "karl-andres/fl-studio-mcp static audit 2026-09-19 (Wiki/GitHub/repo-assessments-2026-09-19-flstudio-mcp.md); never exercised by our controller before v44",
+  "source": "karl-andres static audit 2026-09-19; LIVE battery 2026-09-20 (project projecthermes1.flp, FL21.2.2.3914, v44)",
   "availability": {
     "channels.midiNoteOn": {
-      "status": "unverified",
-      "guard": "getattr in _h_channel_preview_note; raises code=api_unavailable",
+      "status": "confirmed_present",
+      "evidence": "preview_note ok:true on ch0 (Sampler) and ch1 (MF MIDI); ch1 note heard on physical MicroFreak and logged by relay (on vel90 -> off vel0 +227ms)",
       "signature_assumed": "midiNoteOn(channel_index_global, note, velocity, midi_channel=-1)"
     },
     "channels.midiNoteOff": {
-      "status": "unverified",
+      "status": "not_exercised",
+      "evidence": "release path used was velocity-0 note-on (release_path=velocity0-on) on this build; no stuck notes across multiple preview calls",
       "fallback": "velocity-0 note-on",
       "guard": "getattr in _flush_due_notes"
     },
     "mixer.armTrack": {
-      "status": "unverified",
-      "guard": "getattr in _h_mixer_set_arm",
-      "semantics_assumed": "bare toggle like muteTrack/soloTrack"
+      "status": "confirmed_present",
+      "evidence": "set_arm track 1 on->off round-trip with readback, 2026-09-20 battery"
     },
     "mixer.isTrackArmed": {
-      "status": "unverified",
-      "guard": "getattr in _h_mixer_set_arm + _track_armed"
+      "status": "confirmed_present",
+      "evidence": "readback matched every requested arm transition"
     },
     "transport.getLoopMode": {
-      "status": "unverified",
-      "mapping_assumed": "1=song 0=pattern (from karl/calvinw lineage; MUST confirm live)"
+      "status": "confirmed_present",
+      "mapping_confirmed": "get_play_state.loop_mode reported 'pattern'/'song' agreeing with requested set_loop_mode both ways; restored to pattern at end of battery"
     },
     "transport.setLoopMode": {
-      "status": "unverified",
-      "semantics_assumed": "bare toggle, no arguments"
+      "status": "confirmed_present",
+      "evidence": "pattern->song->pattern all succeeded with readback"
     }
   },
   "safety": {
@@ -45,9 +46,10 @@
     "set_loop_mode": "transient per set_song_position precedent"
   },
   "open_questions": [
-    "does midiNoteOn latch or auto-release on 21.2.2",
-    "is getLoopMode 0/1 mapping inverted on this build",
-    "do mixer arm APIs exist on 21.2.2 at all (karl develops against FL 26)"
+    "midiNoteOn native latch behavior (explicit release works, so moot for tool)",
+    "does channels.midiNoteOff exist at all on 21.2.2 (velocity-0 path chosen; verify via api_probe dir)",
+    "toolbar visual agreement for loop mode (readback-only confirmation so far)",
+    "STILL UNTESTED: daemon-killed-mid-hold OnIdle auto-release proof (deferred to avoid routing churn 2026-09-20)"
   ],
-  "next_recommended_action": "live battery at next stack bring-up: ping build v44, api_probe dir for channels/mixer/transport, preview note with sendlog balance check + daemon-kill stuck-note test, set_arm rollback, loop mode vs toolbar; then raise/demote status here and in ROADMAP P0.6 checkpoint"
+  "next_recommended_action": "one-time api_probe dir('channels') for midiNoteOff presence; daemon-kill auto-release test on a night where churn is acceptable; raise to measured_repeated after second clean battery"
 }

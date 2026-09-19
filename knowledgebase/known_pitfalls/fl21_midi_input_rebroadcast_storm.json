@@ -1,0 +1,26 @@
+{
+  "date": "2026-09-20",
+  "author": "Hermes experimental / Nicholas",
+  "topic": "FL 21.2.2 enabled MIDI inputs re-broadcast to all numbered outputs; relay/loopMIDI storm laws",
+  "affected": ["FL Options>MIDI settings", "mf_mcp.relay lane", "loopMIDI topology"],
+  "confidence_level": "measured_repeated",
+  "evidence": {
+    "storm": "85553 relay note events in ~51s (~1670 ev/s) on shared base loopMIDI Port with FL input enabled; no transport running",
+    "matrix": "post-reboot write-one-note-per-output map: multi-input bleed while 4 FL inputs enabled; strict 1:1 same-port loops after RX-only enable + blanked untended output numbers",
+    "clean": "single channels.preview_note(ch=1) -> sendlog exactly 2 entries (on vel90 / off vel0 at +215..227ms), audible MicroFreak one-shot, zero residual growth"
+  },
+  "laws": [
+    "enable only controller/automation FL input rows",
+    "blank output port numbers nobody explicitly targets",
+    "hardware/relay lanes need a dedicated tenant-free loopMIDI port",
+    "relaunch relays DRY first and verify single-shot sendlog balance",
+    "use --max-seconds bounded runs until topology proven"
+  ],
+  "secondary_pitfalls": {
+    "winmm_suffix_drift": "mido names gain/lose enumeration suffix across reboots (loopMIDI Port 2 4 -> 2 3); resolve by base-name substring",
+    "driver_graph_corruption": "ports can stop looping after churn while FL holds endpoints; cure is reboot",
+    "daemon_reader_stall": "daemon TCP alive, heartbeat_age grows, FL actually sends (queued SysEx on cable); cure is daemon restart"
+  },
+  "open_questions": ["is FL re-broadcast gated by an input-row echo/recall option on 21.2.2.3914 or unconditional"],
+  "next_action": "add >1-enabled-input and duplicate-number warnings to flstudio-stack-startup.bat port-drift check"
+}
