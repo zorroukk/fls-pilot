@@ -12,7 +12,7 @@
 - **Source/Method:** sendlog rate analysis (`%LOCALAPPDATA%\mf-mcp\sendlog.jsonl`), mido port-enumeration matrix test, live `channel.preview_note`.
 - **Laws (add to any FL+loopMIDI+hardware bring-up checklist):**
   1. Enable ONLY controller/automation input rows in FL. A "convenience" enabled input (hardware keyboard, loop monitor) is an echo leg.
-  2. Blank the port number of every output nobody explicitly targets (hardware direct-out, spare loopMIDI ports). Numbered = routable.
+  2. Blank the port number of every output nobody explicitly targets (hardware direct-out, spare loopMIDI ports). Numbered = routable. CAUTION (same-night correction): legacy projects save port numbers INSIDE their MIDI Out channels — blanking direct `Arturia MicroFreak` #10 silently orphaned "Fix notes FIXED.flp" (notes visible, zero audio; MIDI Out makes no sound in FL itself). Check open/legacy projects before blanking; prefer breaking echo rings by disabling the offending INPUT row. One Freak path live at a time: direct #10 OR relay #20, never both with the Freak input row enabled.
   3. Relay/hardware lanes need a DEDICATED loopMIDI port with zero other tenants — never the base `loopMIDI Port`.
   4. Launch relays DRY first (log-only) and verify a single-shot on/off in the sendlog before connecting the instrument.
   5. Prefer bounded runs (`--max-seconds`) for any new live relay until the topology is proven.
