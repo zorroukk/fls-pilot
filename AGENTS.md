@@ -209,6 +209,6 @@ To keep the workspace clean and maintain context for generated artifacts, agents
 - **Generated MIDI (`scratch/midi/`)**: All exported or generated MIDI files MUST be placed in session- or task-specific subdirectories (e.g., `scratch/midi/YYYY-MM-DD_task_name/`).
 - **Analysis Data & State Dumps (`scratch/analysis/`)**: JSON dumps of FL Studio state, diagnostic metrics, and snapshots MUST be saved in session-based subdirectories (e.g., `scratch/analysis/YYYY-MM-DD_session_name/`).
 - **Audio Files (`scratch/audio/`)**: Rendered bounces and reference audio tracks (WAV, MP3) MUST be saved here.
-- **Logs (`scratch/logs/`)**: Text-based logs (e.g., `daemon.log`, `mix_review.log`) MUST be collected here.
+- **Logs (`scratch/logs/`)**: Text-based logs (e.g., `daemon.log`, `mix_review.log`) MUST be collected here. The daemon mirrors this automatically when launched with the repo as CWD, and otherwise writes `%LOCALAPPDATA%\flstudio-mcp\logs\daemon.log` (7-day rotation; override with `FLSTUDIO_MCP_LOG_DIR`).
 
 When writing files, agents MUST ensure the target subdirectory exists, creating it if necessary (e.g., using `os.makedirs(..., exist_ok=True)` in Python).
