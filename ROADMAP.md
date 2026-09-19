@@ -99,6 +99,18 @@ Verified live against FL Studio via TCP bridge on macOS, including guided cleanu
   design.
 - Preserve the rollback contract; the safety audit must remain at 0 write gaps.
 
+### P0.6 — Live Audition Pack (ideas ported from karl-andres/fl-studio-mcp audit, 2026-09-19)
+- [x] `channel.preview_note` transient audition (OnIdle auto-release, probe-guarded `channels.midiNoteOn`)
+- [x] `mixer.set_arm` write-safe with rollback (probe-guarded `mixer.armTrack`/`isTrackArmed`, `arm` added to track snapshot)
+- [x] `transport.set_loop_mode` transient toggle-to-state (probe-guarded `transport.getLoopMode`/`setLoopMode`) + `loop_mode` in `get_play_state`
+- [x] Controller build marker bump channels-v43 -> channels-v44
+- [x] Offline registry/safety tests + static audit coverage + knowledgebase entry
+- [ ] LIVE VERIFICATION CHECKPOINT (next stack bring-up): date ____, FL build 21.2.2.3914,
+      controller marker channels-v44 -- confirm midiNoteOn/midiNoteOff presence + auto-release
+      (no stuck notes; check relay sendlog balance), armTrack/isTrackArmed presence, and the
+      getLoopMode 0/1 -> pattern/song mapping. Demote anything that fails to api-limited in
+      knowledgebase/fl_api/live_audition_apis.json and the API capability audit.
+
 ### P1 — Jam-to-Project / Structured Cleanup Workflows
 - Jam Session Analyzer
 - Jam Session Cleanup Plan Generator

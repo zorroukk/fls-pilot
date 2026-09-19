@@ -348,6 +348,7 @@ HEARTBEAT_INTERVAL = 0.5  # seconds between heartbeats
 # ---------------------------------------------------------------------------
 
 _last_heartbeat = 0.0
+_pending_notes = []  # (channel, note, release_at) -- preview notes released by OnIdle
 _fl_version = "unknown"
 
 # Inbound chunk reassembly (server -> device requests split by the same
@@ -402,9 +403,14 @@ def OnDeInit():
 
 
 def OnIdle():
-    """Called by FL frequently. Used here ONLY for heartbeat emission."""
+    """Called by FL frequently: heartbeat + preview-note auto-release.
+
+    Device-side release guarantees a preview note can never outlive its
+    hold even if the MCP server dies between request and follow-up.
+    """
     global _last_heartbeat
     now = time.time()
+    _flush_due_notes(now)
     if now - _last_heartbeat >= HEARTBEAT_INTERVAL:
         _emit_heartbeat()
         _last_heartbeat = now
@@ -674,7 +680,7 @@ def _h_ping(params):
     return {
         "fl_version": _fl_version,
         "protocol_version": PROTOCOL_VERSION,
-        "build": "channels-v43",  # reload marker -- bump to verify reloads take
+        "build": "channels-v44",  # reload marker -- bump to verify reloads take
         "ts": time.time(),
     }
 
@@ -745,7 +751,37 @@ def _h_record(params):
 
 
 def _h_get_play_state(params):
-    return {"playing": _is_playing(), "recording": _is_recording()}
+    out = {"playing": _is_playing(), "recording": _is_recording()}
+    getter = getattr(transport, "getLoopMode", None)
+    if getter is not None:
+        raw = None
+        try:
+            raw = int(getter())
+        except Exception:
+            raw = None
+        if raw is not None:
+            out["loop_mode"] = "song" if raw == 1 else "pattern"
+    return out
+
+
+def _h_transport_set_loop_mode(p):
+    """Loop mode is a bare toggle on the FL API; flip once when it differs.
+
+    The 0/1 -> pattern/song mapping mirrors the karl-andres lineage and is
+    PENDING LIVE CONFIRMATION on 21.2.2 (see live_audition_apis KB entry).
+    """
+    mode = str(p["mode"])
+    getter = getattr(transport, "getLoopMode", None)
+    toggle = getattr(transport, "setLoopMode", None)
+    if getter is None or toggle is None:
+        raise _ClientError(
+            "transport loop mode not available on this FL build", code="api_unavailable"
+        )
+    current = "song" if int(getter()) == 1 else "pattern"
+    if current != mode:
+        toggle()
+        current = "song" if int(getter()) == 1 else "pattern"
+    return {"loop_mode": current}
 
 
 _SONGLENGTH_MS = 0
@@ -828,6 +864,17 @@ def _h_get_project_state(params):
     }
 
 
+def _track_armed(i):
+    """Arm state is optional API surface -- reports False when the build lacks it."""
+    getter = getattr(mixer, "isTrackArmed", None)
+    if getter is None:
+        return False
+    try:
+        return bool(getter(i))
+    except Exception:
+        return False
+
+
 def _mixer_track_dict(i):
     dock = -1
     try:
@@ -847,6 +894,7 @@ def _mixer_track_dict(i):
         "pan": round(mixer.getTrackPan(i), 4),
         "mute": bool(mixer.isTrackMuted(i)),
         "solo": bool(mixer.isTrackSolo(i)),
+        "arm": _track_armed(i),
         "color": _color_out(_safe_track_color(i)),
         "dock_side": dock,
         "stereo_sep": sep,
@@ -1176,10 +1224,76 @@ def _h_mixer_set_solo(p):
     return {"track": t, "solo": bool(mixer.isTrackSolo(t))}
 
 
+def _h_mixer_set_arm(p):
+    """Arm state toggle. armTrack/isTrackArmed are probe-guarded: builds
+    without the API fail with code=api_unavailable BEFORE any mutation."""
+    t = int(p["track"])
+    setter = getattr(mixer, "armTrack", None)
+    getter = getattr(mixer, "isTrackArmed", None)
+    if setter is None or getter is None:
+        raise _ClientError(
+            "mixer arm not available on this FL build", code="api_unavailable"
+        )
+    if bool(getter(t)) != bool(p["state"]):
+        setter(t)
+    return {"track": t, "arm": bool(getter(t))}
+
+
 def _h_mixer_set_name(p):
     t = int(p["track"])
     mixer.setTrackName(t, str(p["name"]))
     return {"track": t, "name": mixer.getTrackName(t)}
+
+
+def _flush_due_notes(now):
+    """Release preview notes whose hold has elapsed (invoked from OnIdle)."""
+    if not _pending_notes:
+        return
+    note_off = getattr(channels, "midiNoteOff", None)
+    note_on = getattr(channels, "midiNoteOn", None)
+    keep = []
+    for channel, note, release_at in _pending_notes:
+        if now < release_at:
+            keep.append((channel, note, release_at))
+            continue
+        try:
+            if note_off is not None:
+                note_off(channel, note)
+            elif note_on is not None:
+                # No dedicated off API: velocity-0 note-on is the standard off.
+                note_on(channel, note, 0, -1)
+        except Exception:
+            pass  # best effort -- never break the idle loop
+    _pending_notes[:] = keep
+
+
+def _h_channel_preview_note(p):
+    """Momentary audition note through the channel-preview API.
+
+    FL routes it like a keyboard keypress on that channel, so a MIDI Out
+    channel (MicroFreak via loopMIDI) sounds without any recording. Release
+    is guaranteed device-side via OnIdle -- no stuck gates if the server
+    dies mid-hold. midiNoteOn is probe-guarded (channels-v44).
+    """
+    idx = int(p["channel"])
+    note = int(p["note"])
+    velocity = int(p["velocity"])
+    hold_ms = int(p["hold_ms"])
+    note_on = getattr(channels, "midiNoteOn", None)
+    if note_on is None:
+        raise _ClientError(
+            "channels.midiNoteOn not available on this FL build", code="api_unavailable"
+        )
+    note_on(idx, note, velocity, -1)
+    _pending_notes.append((idx, note, time.time() + hold_ms / 1000.0))
+    return {
+        "channel": idx,
+        "note": note,
+        "velocity": velocity,
+        "hold_ms": hold_ms,
+        "release_path": "midiNoteOff" if getattr(channels, "midiNoteOff", None)
+        else "velocity0-on" if note_on else "none",
+    }
 
 
 def _h_channel_set_volume(p):
@@ -2548,6 +2662,7 @@ _HANDLERS = {
     "toggle_play": _h_toggle_play,
     "record": _h_record,
     "get_play_state": _h_get_play_state,
+    "transport_set_loop_mode": _h_transport_set_loop_mode,
     "get_song_position": _h_get_song_pos,
     "set_song_position": _h_set_song_pos,
     "get_project_state": _h_get_project_state,
@@ -2562,6 +2677,7 @@ _HANDLERS = {
     "mixer_set_stereo_sep": _h_mixer_set_stereo_sep,
     "mixer_get_stereo_sep": _h_mixer_get_stereo_sep,
     "mixer_set_mute": _h_mixer_set_mute,
+    "mixer_set_arm": _h_mixer_set_arm,
     "mixer_set_solo": _h_mixer_set_solo,
     "mixer_set_name": _h_mixer_set_name,
     "channel_set_volume": _h_channel_set_volume,
@@ -2592,6 +2708,7 @@ _HANDLERS = {
     "arrange_clone_pattern": _h_arrange_clone_pattern,
     "arrange_add_marker": _h_arrange_add_marker,
     "channel_select": _h_channel_select,
+    "channel_preview_note": _h_channel_preview_note,
     "channel_selected": _h_channel_selected,
     "ensure_piano_roll": _h_ensure_piano_roll,
     "pattern_list": _h_pattern_list,

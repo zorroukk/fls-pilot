@@ -1,0 +1,53 @@
+{
+  "date": "2026-09-19",
+  "author": "Hermes experimental profile / Nicholas",
+  "topic": "Live Audition APIs availability matrix",
+  "affected_api": [
+    "CMD_CHANNEL_PREVIEW_NOTE",
+    "CMD_MIXER_SET_ARM",
+    "CMD_TRANSPORT_SET_LOOP_MODE"
+  ],
+  "confidence_level": "hypothesis",
+  "target_build": "FL Producer Edition v21.2.2 build 3914, controller channels-v44",
+  "source": "karl-andres/fl-studio-mcp static audit 2026-09-19 (Wiki/GitHub/repo-assessments-2026-09-19-flstudio-mcp.md); never exercised by our controller before v44",
+  "availability": {
+    "channels.midiNoteOn": {
+      "status": "unverified",
+      "guard": "getattr in _h_channel_preview_note; raises code=api_unavailable",
+      "signature_assumed": "midiNoteOn(channel_index_global, note, velocity, midi_channel=-1)"
+    },
+    "channels.midiNoteOff": {
+      "status": "unverified",
+      "fallback": "velocity-0 note-on",
+      "guard": "getattr in _flush_due_notes"
+    },
+    "mixer.armTrack": {
+      "status": "unverified",
+      "guard": "getattr in _h_mixer_set_arm",
+      "semantics_assumed": "bare toggle like muteTrack/soloTrack"
+    },
+    "mixer.isTrackArmed": {
+      "status": "unverified",
+      "guard": "getattr in _h_mixer_set_arm + _track_armed"
+    },
+    "transport.getLoopMode": {
+      "status": "unverified",
+      "mapping_assumed": "1=song 0=pattern (from karl/calvinw lineage; MUST confirm live)"
+    },
+    "transport.setLoopMode": {
+      "status": "unverified",
+      "semantics_assumed": "bare toggle, no arguments"
+    }
+  },
+  "safety": {
+    "preview_note": "transient; device-side OnIdle auto-release bounds stuck notes even if server dies mid-hold",
+    "set_arm": "write-safe; mixer_track:N snapshot now includes arm field",
+    "set_loop_mode": "transient per set_song_position precedent"
+  },
+  "open_questions": [
+    "does midiNoteOn latch or auto-release on 21.2.2",
+    "is getLoopMode 0/1 mapping inverted on this build",
+    "do mixer arm APIs exist on 21.2.2 at all (karl develops against FL 26)"
+  ],
+  "next_recommended_action": "live battery at next stack bring-up: ping build v44, api_probe dir for channels/mixer/transport, preview note with sendlog balance check + daemon-kill stuck-note test, set_arm rollback, loop mode vs toolbar; then raise/demote status here and in ROADMAP P0.6 checkpoint"
+}

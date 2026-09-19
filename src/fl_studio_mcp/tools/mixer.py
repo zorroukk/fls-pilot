@@ -39,7 +39,7 @@ def register(mcp: FastMCP) -> None:
             Field(
                 description=(
                     "Mixer action: list, get, get_selected, get_route, "
-                    "select, set_color, set_mute, set_name, set_pan, "
+                    "select, set_arm, set_color, set_mute, set_name, set_pan, "
                     "set_route, set_solo, set_stereo_separation, set_volume."
                 )
             ),
@@ -54,6 +54,7 @@ def register(mcp: FastMCP) -> None:
                     "  get_selected: {}\n"
                     "  get_route: {track: int}\n"
                     "  select: {track: int}\n"
+                    "  set_arm: {track: int, state: bool}\n"
                     "  set_color: {track: int, color: int} or {track, r, g, b}\n"
                     "  set_mute: {track: int, state: bool}\n"
                     "  set_name: {track: int, name: str}\n"
@@ -69,7 +70,7 @@ def register(mcp: FastMCP) -> None:
         """Run one consolidated mixer operation through the operation registry.
 
         Read-only actions call the bridge after registry validation.
-        Persistent writes (name, volume, pan, mute, solo, color, route,
+        Persistent writes (name, volume, pan, mute, solo, arm, color, route,
         stereo separation, select) use the safety layer: snapshot -> write
         -> readback -> changelog -> rollback restore.
 
@@ -93,6 +94,7 @@ def register(mcp: FastMCP) -> None:
             "get",
             "get_route",
             "select",
+            "set_arm",
             "set_color",
             "set_mute",
             "set_name",

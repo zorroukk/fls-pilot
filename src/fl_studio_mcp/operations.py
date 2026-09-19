@@ -277,6 +277,35 @@ def _validate_track_bool(params: Mapping[str, Any]) -> dict[str, Any]:
     return {"track": _non_bool_int(params, "track"), "state": _bool_param(params, "state")}
 
 
+def _validate_loop_mode(params: Mapping[str, Any]) -> dict[str, Any]:
+    _reject_unknown(params, {"mode"})
+    mode = _string_param(params, "mode").lower()
+    if mode not in ("pattern", "song"):
+        raise OperationValidationError("mode must be 'pattern' or 'song'")
+    return {"mode": mode}
+
+
+def _validate_preview_note(params: Mapping[str, Any]) -> dict[str, Any]:
+    _reject_unknown(params, {"channel", "note", "velocity", "hold_ms"})
+    out = {
+        "channel": _non_bool_int(params, "channel"),
+        "note": _non_bool_int(params, "note"),
+    }
+    if out["note"] > 127:
+        raise OperationValidationError("note must be 0-127")
+    out["velocity"] = (
+        96 if "velocity" not in params else _non_bool_int(params, "velocity", minimum=1)
+    )
+    if out["velocity"] > 127:
+        raise OperationValidationError("velocity must be 1-127")
+    out["hold_ms"] = (
+        200 if "hold_ms" not in params else _non_bool_int(params, "hold_ms", minimum=10)
+    )
+    if out["hold_ms"] > 10000:
+        raise OperationValidationError("hold_ms must be 10-10000")
+    return out
+
+
 def _validate_color_params(
     params: Mapping[str, Any], *, index_name: str, output_name: str
 ) -> dict[str, Any]:
@@ -1042,6 +1071,12 @@ _DEFAULT_SPECS = (
         validator=_validate_channel_steps_read,
         command=protocol.CMD_CHANNEL_GET_STEPS,
     ),
+    _transient_spec(
+        domain="channel",
+        action="preview_note",
+        validator=_validate_preview_note,
+        command=protocol.CMD_CHANNEL_PREVIEW_NOTE,
+    ),
     _read_spec(
         domain="channel",
         action="list",
@@ -1163,6 +1198,15 @@ _DEFAULT_SPECS = (
         command=protocol.CMD_MIXER_SET_COLOR,
         snapshot_scope_builder=_mixer_scope,
         restore_builder=_restore_mixer_color,
+    ),
+    _persistent_write_spec(
+        domain="mixer",
+        action="set_arm",
+        validator=_validate_track_bool,
+        command=protocol.CMD_MIXER_SET_ARM,
+        snapshot_scope_builder=_mixer_scope,
+        restore_builder=_restore_mixer_bool(protocol.CMD_MIXER_SET_ARM, "arm"),
+        verify_builder=lambda params: ("arm", params["state"]),
     ),
     _persistent_write_spec(
         domain="mixer",
@@ -1457,6 +1501,12 @@ _DEFAULT_SPECS = (
         action="record",
         validator=_validate_empty,
         command=protocol.CMD_RECORD,
+    ),
+    _transient_spec(
+        domain="transport",
+        action="set_loop_mode",
+        validator=_validate_loop_mode,
+        command=protocol.CMD_TRANSPORT_SET_LOOP_MODE,
     ),
     _persistent_write_spec(
         domain="transport",
