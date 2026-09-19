@@ -105,11 +105,15 @@ Verified live against FL Studio via TCP bridge on macOS, including guided cleanu
 - [x] `transport.set_loop_mode` transient toggle-to-state (probe-guarded `transport.getLoopMode`/`setLoopMode`) + `loop_mode` in `get_play_state`
 - [x] Controller build marker bump channels-v43 -> channels-v44
 - [x] Offline registry/safety tests + static audit coverage + knowledgebase entry
-- [ ] LIVE VERIFICATION CHECKPOINT (next stack bring-up): date ____, FL build 21.2.2.3914,
-      controller marker channels-v44 -- confirm midiNoteOn/midiNoteOff presence + auto-release
-      (no stuck notes; check relay sendlog balance), armTrack/isTrackArmed presence, and the
-      getLoopMode 0/1 -> pattern/song mapping. Demote anything that fails to api-limited in
-      knowledgebase/fl_api/live_audition_apis.json and the API capability audit.
+- [x] LIVE VERIFICATION CHECKPOINT (2026-09-20): FL build 21.2.2.3914, controller marker
+      channels-v44 -- midiNoteOn CONFIRMED end-to-end (preview_note on `MF MIDI` channel heard
+      on physical MicroFreak through relay; sendlog-balanced on/off, no stuck notes, release via
+      velocity-0-on path); armTrack/isTrackArmed CONFIRMED present (track 1 on->off with readback);
+      setLoopMode/getLoopMode CONFIRMED with pattern<->song round-trip, restored to pattern.
+      midiNoteOff native presence: not exercised (fallback path used). Daemon-kill auto-release
+      proof deferred. Full storm/routing forensics: knowledgebase/known_pitfalls/
+      fl21_midi_input_rebroadcast_storm.md (+ JSON); API evidence raised to measured_once in
+      live_audition_apis.json.
 
 ### P1 — Jam-to-Project / Structured Cleanup Workflows
 - Jam Session Analyzer

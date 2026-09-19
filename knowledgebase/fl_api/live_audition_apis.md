@@ -6,7 +6,7 @@
 **Affected File/API**: `protocol.CMD_CHANNEL_PREVIEW_NOTE` (`channels.midiNoteOn`/`midiNoteOff`),
 `protocol.CMD_MIXER_SET_ARM` (`mixer.armTrack`/`isTrackArmed`),
 `protocol.CMD_TRANSPORT_SET_LOOP_MODE` (`transport.getLoopMode`/`setLoopMode`)
-**Confidence Level**: hypothesis
+**Confidence Level**: measured_once (LIVE battery 2026-09-20; was hypothesis)
 
 ## Context
 The karl-andres/fl-studio-mcp audit (2026-09-19, GitHub lane) surfaced four user-facing
@@ -30,8 +30,15 @@ and transport loop-mode toggling. The fourth (selected channel) already existed 
   rollback path and gains an `arm` field in every `mixer_track:N` snapshot.
 
 ## Tested Values
-None yet -- all three are probe-guarded (`getattr` + `code=api_unavailable` before any
-mutation). Offline registry/tool tests pass (tests/test_live_audition_pack.py).
+**2026-09-20 LIVE battery (FL 21.2.2.3914, controller channels-v44, projecthermes1.flp):**
+- `channel.preview_note` ch0 Sampler: ok, `release_path=velocity0-on`, no stuck notes.
+- `channel.preview_note` ch1 `MF MIDI`: **heard on the physical MicroFreak** through the rebuilt
+  relay lane; sendlog balance exactly on(vel 90)+off(vel 0) at +215..227 ms, zero residual growth.
+- `mixer.set_arm` track 1: on->off with readback agreement both transitions.
+- `transport.set_loop_mode`: pattern->song->pattern, `get_play_state.loop_mode` agreed with every
+  requested state; final state restored to `pattern`.
+- `channels.midiNoteOff`: not exercised — the velocity-0 fallback path was used on this build.
+- NOT yet run: daemon-killed-mid-hold auto-release proof (deliberately skipped; routing churn risk).
 
 ## Source/Method
 Static audit of `%LOCALAPPDATA%/Temp/fl-studio-mcp-karla` (clone audited 2026-09-19,
