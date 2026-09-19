@@ -77,6 +77,21 @@ def _get_bridge() -> FLBridge:
         return _bridge
 
 
+def _reset_bridge() -> None:
+    """Drop a poisoned bridge singleton so the next request re-enumerates
+    MIDI ports by name. Used after raw transport-handle failures (e.g. the
+    loopMIDI device was restarted/recreated under us); without this the
+    daemon keeps a dead port handle forever (2026-09 forensics cause #3)."""
+    global _bridge
+    with _bridge_lock:
+        b, _bridge = _bridge, None
+    if b is not None:
+        try:
+            b.close()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("bridge close during reset raised (ignored)")
+
+
 def _handle_request(req: dict) -> dict:
     op = req.get("op")
 
@@ -109,6 +124,19 @@ def _handle_request(req: dict) -> dict:
             return {"ok": False, "exc": "FLPortMissing", "error": str(e)}
         except FLBridgeError as e:
             return {"ok": False, "exc": "FLBridgeError", "error": str(e)}
+        except (OSError, RuntimeError) as e:
+            # Raw MIDI-handle failure (loopMIDI device restart/rename).
+            # Dispose of the bridge so the NEXT call re-attaches by name;
+            # this request is lost but the stack self-heals without a
+            # process restart.
+            logger.exception("MIDI transport dead; resetting bridge for re-attach")
+            _reset_bridge()
+            return {
+                "ok": False,
+                "exc": "TransportDead",
+                "error": f"{type(e).__name__}: {e}",
+                "healed": True,
+            }
         except Exception as e:  # pragma: no cover - defensive
             return {"ok": False, "exc": "Error", "error": f"{type(e).__name__}: {e}"}
 
@@ -183,11 +211,49 @@ class _Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+def _default_log_dir() -> str:
+    """Where daemon.log lives: explicit env, else repo scratch/logs when
+    launched from the repo (AGENTS.md convention), else %LOCALAPPDATA%."""
+    env = os.environ.get("FLSTUDIO_MCP_LOG_DIR")
+    if env:
+        return env
+    cwd = os.getcwd()
+    if os.path.exists(os.path.join(cwd, "pyproject.toml")):
+        return os.path.join(cwd, "scratch", "logs")
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "flstudio-mcp", "logs")
+
+
+def _attach_file_logger() -> None:
+    """Mirror logs to a 7-day rotating daemon.log so deaths are explainable
+    (2026-09 forensics cause #4: stderr-only logging meant zero postmortems).
+    Never fatal: if the file handler cannot be created, stderr logging stands."""
+    try:
+        from logging.handlers import TimedRotatingFileHandler
+
+        log_dir = _default_log_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        handler = TimedRotatingFileHandler(
+            os.path.join(log_dir, "daemon.log"),
+            when="midnight",
+            backupCount=7,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(handler)
+        logger.info("File logging to %s", log_dir)
+    except OSError as e:  # pragma: no cover - defensive
+        logger.warning("File logging disabled: %s", e)
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.environ.get("FLSTUDIO_MCP_LOG", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    _attach_file_logger()
     host = os.environ.get("FLSTUDIO_MCP_TCP_HOST", DEFAULT_TCP_HOST)
     port = int(os.environ.get("FLSTUDIO_MCP_TCP_PORT", DEFAULT_TCP_PORT))
 
