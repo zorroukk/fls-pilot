@@ -16,9 +16,36 @@ from __future__ import annotations
 
 import os
 
-PIANO_ROLL_SCRIPTS_DIR = os.path.expanduser(
-    "~/Documents/Image-Line/FL Studio/Settings/Piano roll scripts"
-)
+def _resolve_piano_roll_scripts_dir() -> str:
+    """Locate FL's USER 'Piano roll scripts' folder reliably.
+
+    Pitfall (measured 2026-09-20, FL 21.2.2.3914, Windows 11): the user's
+    Documents folder can be localized and/or OneDrive-redirected -- e.g.
+    C:\\Users\\<user>\\OneDrive\\Dokumenter instead of C:\\Users\\<user>\\
+    Documents. os.path.expanduser("~/Documents/...") then silently resolves
+    to a path FL never scans: the script file writes fine, but FL's script
+    menu stays empty and Ctrl+Alt+Y never arms. FL itself reads the real
+    location from the shell-folders registry, so we do the same and fall
+    back to ~/Documents only if the registry is unavailable.
+    """
+    suffix = os.path.join("Image-Line", "FL Studio", "Settings", "Piano roll scripts")
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+        ) as key:
+            raw, _ = winreg.QueryValueEx(key, "Personal")
+        personal = os.path.expandvars(str(raw))
+        if personal:
+            return os.path.join(personal, suffix)
+    except OSError:
+        pass
+    return os.path.expanduser(os.path.join("~/Documents", suffix))
+
+
+PIANO_ROLL_SCRIPTS_DIR = _resolve_piano_roll_scripts_dir()
 APPLY_SCRIPT_NAME = "MCP_Apply.pyscript"
 
 _DEFAULT_VELOCITY = 100 / 127.0
