@@ -1,0 +1,22 @@
+{
+  "date": "2026-09-20",
+  "author": "Hermes experimental / Nicholas",
+  "topic": "~/Documents is not the real Documents folder on localized/OneDrive-redirected Windows; FL user script scans silently miss",
+  "affected": ["pyscript_gen.PIANO_ROLL_SCRIPTS_DIR", "apply_notes trigger flow", "any user-data path built from expanduser('~/Documents')"],
+  "confidence_level": "measured_repeated",
+  "evidence": {
+    "machine": "Windows 11 Norwegian locale, OneDrive Known-Folder-Move: Personal shell folder = C:\\Users\\nicho\\OneDrive\\Dokumenter",
+    "symptom": "daemon apply_notes wrote MCP_Apply.pyscript OK (readable back via same path), FL 21.2.2.3914 Piano roll Script menu never listed it across one restart; FL's REAL user settings tree (full subfolder layout incl. Hardware, Audio scripts) lives under OneDrive\\Dokumenter and its 'Piano roll scripts' existed but was empty",
+    "false_trail": "Documents\\Image-Line\\FL Studio existed but contains only 'Settings' because the DAEMON created it mid-session - an empty literal ~/Documents does NOT prove FL does not use it; compare against the shell-folder registry value instead",
+    "cure": "registry HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders /v Personal (expandvars) -> true docs root; resolver patch lands in pyscript_gen, verified RESOLVED: C:\\Users\\nicho\\OneDrive\\Dokumenter\\Image-Line\\FL Studio\\Settings\\Piano roll scripts"
+  },
+  "laws": [
+    "never hardcode ~/Documents for user data on Windows; resolve Personal via User Shell Folders",
+    "recent-files registry values (General\\FruityLoopsMainForm LastProjectPath etc.) reveal FL's real data roots on a mystery machine",
+    "a script menu that stays empty despite correct file + folder + extension = scan-path mismatch, not syntax",
+    "FL scans user piano-roll scripts at startup: file added mid-session needs an FL restart to appear"
+  ],
+  "reproduction": "write any valid .pyscript into literal %USERPROFILE%\\Documents\\Image-Line\\FL Studio\\Settings\\Piano roll scripts on a KFM machine, restart FL, menu stays empty; copy same file into Personal-registry path, restart FL, menu lists it",
+  "open_questions": ["does 21.2.2 rescan when the Script submenu opens (avoiding the restart) - untested", "exact menu placement for Script.Category 'MCP' header vs flat listing - pending first live run"],
+  "next_action": "restart daemon at next quiet moment to load resolver patch; until then apply_notes writes to the stale path - copy MCP_Apply.pyscript to the Personal path before triggering"
+}
