@@ -331,4 +331,4 @@ Stable — 2.1.0 (post-audit hardening; see docs/CHANGELOG.md). Fully compatible
 Issues and pull requests:
 [github.com/zorroukk/fls-pilot](https://github.com/zorroukk/fls-pilot).
 
-<!-- mcp-name: io.github.thunderdew-dawn/flstudio-mcp -->
+<!-- mcp-name: io.github.zorroukk/fls-pilot -->

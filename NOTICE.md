@@ -7,8 +7,8 @@ for compatibility with existing MCP client configurations, installer scripts,
 and downstream references. (Command names were originally retained but have been
 consolidated and renamed as of v2.0.0).
 
-The current maintained repository is
-[`thunderdew-dawn/flstudio-mcp`](https://github.com/thunderdew-dawn/flstudio-mcp).
+This tree continues the `thunderdew-dawn/flstudio-mcp` hardening line and
+is maintained at [`zorroukk/fls-pilot`](https://github.com/zorroukk/fls-pilot).
 
 ## What This Fork Adds
 
@@ -37,5 +37,5 @@ Core additions and maintained differences include:
 ## Attribution
 
 The upstream MIT license and original copyright notice are preserved in
-`LICENSE`. New work in this fork is maintained by `thunderdew-dawn` and
+`LICENSE`. New work in this fork is maintained by `zorroukk` and
 contributors under the same MIT license.
