@@ -123,7 +123,7 @@ The server exposes a comprehensive suite of tools across all these phases. For a
 This repository is a materially extended fork of
 [`rosasynthesiz/flstudio-mcp`](https://github.com/rosasynthesiz/flstudio-mcp),
 now maintained at
-[`thunderdew-dawn/flstudio-mcp`](https://github.com/thunderdew-dawn/flstudio-mcp).
+[`thunderdew-dawn/fls-pilot`](https://github.com/thunderdew-dawn/fls-pilot).
 The project keeps the `fl-studio-mcp` package and command names for
 compatibility, while the fork's engineering direction is now explicit:
 rollback-first FL Studio production tooling, documented API-evidence handling,
@@ -207,16 +207,16 @@ These are properties of FL Studio's scripting API, stated plainly:
 #### Windows
 
 ```bat
-git clone https://github.com/thunderdew-dawn/flstudio-mcp
-cd flstudio-mcp
+git clone https://github.com/thunderdew-dawn/fls-pilot
+cd fls-pilot
 scripts\install_windows.bat
 ```
 
 #### macOS
 
 ```bash
-git clone https://github.com/thunderdew-dawn/flstudio-mcp
-cd flstudio-mcp
+git clone https://github.com/thunderdew-dawn/fls-pilot
+cd fls-pilot
 chmod +x scripts/install_macos.sh
 ./scripts/install_macos.sh
 ```
@@ -327,8 +327,8 @@ MIT — see [LICENSE](LICENSE).
 
 ## Status & contributing
 
-Stable — the public 2.0.0 release. Fully compatible with Windows and macOS.
+Stable — 2.1.0 (post-audit hardening; see docs/CHANGELOG.md). Fully compatible with Windows and macOS.
 Issues and pull requests:
-[github.com/thunderdew-dawn/flstudio-mcp](https://github.com/thunderdew-dawn/flstudio-mcp).
+[github.com/thunderdew-dawn/fls-pilot](https://github.com/thunderdew-dawn/fls-pilot).
 
 <!-- mcp-name: io.github.thunderdew-dawn/flstudio-mcp -->

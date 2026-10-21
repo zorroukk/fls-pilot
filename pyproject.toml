@@ -67,9 +67,9 @@ fl-studio-mcp = "fl_studio_mcp.server:main"
 fl-studio-mcp-daemon = "fl_studio_mcp.daemon:main"
 
 [project.urls]
-Homepage = "https://github.com/thunderdew-dawn/flstudio-mcp"
-Repository = "https://github.com/thunderdew-dawn/flstudio-mcp"
-Issues = "https://github.com/thunderdew-dawn/flstudio-mcp/issues"
+Homepage = "https://github.com/thunderdew-dawn/fls-pilot"
+Repository = "https://github.com/thunderdew-dawn/fls-pilot"
+Issues = "https://github.com/thunderdew-dawn/fls-pilot/issues"
 Upstream = "https://github.com/rosasynthesiz/flstudio-mcp"
 
 [tool.hatch.build.targets.wheel]
