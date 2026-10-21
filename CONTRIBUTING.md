@@ -6,7 +6,8 @@ piano roll, routing, and project — through calibrated, safety-checked tools.
 Contributions of all kinds are welcome: bug reports, fixes, new tools, docs,
 and platform support.
 
-This repository is the maintained `thunderdew-dawn/flstudio-mcp` fork of
+This repository (`zorroukk/fls-pilot`) continues the maintained
+`thunderdew-dawn/flstudio-mcp` hardening line, itself a fork of
 `rosasynthesiz/flstudio-mcp`. The package and command names remain stable for
 compatibility, but contributions should follow this fork's rollback-first
 safety layer, API-evidence discipline, and roadmap in `ROADMAP.md`.
