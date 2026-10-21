@@ -381,8 +381,14 @@ def OnInit():
     if _send_sysex_fn is None:
         _send_sysex_fn = getattr(device, "midiOutSysEx", None)
 
+    _port_txt = ""
+    _pf = getattr(device, "getPortNumber", None)
+    if _pf is not None:
+        with _suppress(Exception):
+            _port_txt = ", port " + str(_pf())
     print(
-        "[FLStudioMCP] Ready. FL " + str(_fl_version) + ", protocol v" + str(PROTOCOL_VERSION) + "."
+        "[FLStudioMCP] Ready. FL " + str(_fl_version) + ", protocol v" + str(PROTOCOL_VERSION)
+        + _port_txt + "."
     )
     if _send_sysex_fn is None:
         print(
@@ -399,6 +405,22 @@ def OnInit():
 
 def OnDeInit():
     print("[FLStudioMCP] Shutting down.")
+    # Audit C6: a reload/deinit while preview notes are held used to discard
+    # the queue with the note-on already delivered -- the gate latched on
+    # hardware until a human noticed. Release everything we still own.
+    for channel, note, _release_at, _tries in list(_pending_notes):
+        try:
+            note_off = getattr(channels, "midiNoteOff", None)
+            if note_off is not None:
+                note_off(channel, note)
+            else:
+                channels.midiNoteOn(channel, note, 0, -1)
+        except Exception as e:
+            print(
+                f"[FLStudioMCP] OnDeInit release FAILED ch={channel} "
+                f"note={note}: {e} -- possible latched note, send all-notes-off."
+            )
+    _pending_notes[:] = []
     return
 
 
@@ -444,12 +466,22 @@ def _handle_request_sysex(event, source):
         cont = raw[1]
         seq = raw[2]
         if seq != _rx_expect:
+            if _rx_buf:
+                # Audit D11 mirror: dropping a message silently left the
+                # sender waiting on a false timeout with zero trace here.
+                print("[FLStudioMCP] RX chunk RESYNC: wanted seq "
+                      + str(_rx_expect) + ", got " + str(seq) + "; discarded "
+                      + str(len(_rx_buf)) + " buffered bytes")
             _rx_buf = bytearray()  # gap/retransmit -> resync
             _rx_expect = 0
             if seq != 0:
                 return True
         _rx_buf.extend(raw[3:])
         if len(_rx_buf) > _MAX_RX_BYTES:
+            print("[FLStudioMCP] RX OVERFLOW: discarded "
+                  + str(len(_rx_buf)) + " buffered bytes (cap "
+                  + str(_MAX_RX_BYTES) + ") -- sender will see a timeout; "
+                  "the payload is too large for this transport")
             _rx_buf = bytearray()
             _rx_expect = 0
             return True
@@ -487,18 +519,52 @@ def _handle_request_sysex(event, source):
             "code": "internal_error",
         }
 
-    _send_message(DIR_RESPONSE, request_id, payload)
+    _send_message_guarded(DIR_RESPONSE, request_id, payload)
     return True
+
+
+def _send_message_guarded(direction, request_id, payload):
+    """Audit C1: encoding can still raise on data we failed to sanitize at
+    the source; that must never escape the MIDI callback (documented
+    silent-death class -- a raised handler kills the script thread while the
+    controller row stays green). Answer ok=false instead and log."""
+    try:
+        _send_message(direction, request_id, payload)
+    except Exception as e:
+        print(f"[FLStudioMCP] response send/encode FAILED: {type(e).__name__}: {e}")
+        with _suppress(Exception):
+            _send_message(
+                direction,
+                request_id,
+                {
+                    "v": PROTOCOL_VERSION,
+                    "ok": False,
+                    "error": f"controller response encoding failed: {e}",
+                    "code": "encode_error",
+                },
+            )
 
 
 def OnMidiMsg(event):
     """Some FL builds deliver incoming SysEx through this callback."""
-    event.handled = _handle_request_sysex(event, "OnMidiMsg")
+    # Audit C1: last-line guard -- nothing may escape a FL callback thread.
+    try:
+        event.handled = _handle_request_sysex(event, "OnMidiMsg")
+    except Exception as e:
+        print(f"[FLStudioMCP] UNCAUGHT in OnMidiMsg: {type(e).__name__}: {e}")
+        event.handled = True
 
 
 def OnSysEx(event):
     """FL 21+ / MIDI scripting v40 delivers incoming SysEx here."""
-    event.handled = _handle_request_sysex(event, "OnSysEx")
+    # Audit C1: last-line guard -- an exception escaping the FL callback
+    # thread is the documented silent-death class (script gone, UI row still
+    # enabled, zero frames sent).
+    try:
+        event.handled = _handle_request_sysex(event, "OnSysEx")
+    except Exception as e:
+        print(f"[FLStudioMCP] UNCAUGHT in OnSysEx: {type(e).__name__}: {e}")
+        event.handled = True
 
 
 def OnRefresh(flags):
@@ -677,12 +743,40 @@ def _dispatch(command, params):
 
 
 def _h_ping(params):
-    return {
+    out = {
         "fl_version": _fl_version,
         "protocol_version": PROTOCOL_VERSION,
-        "build": "channels-v44",  # reload marker -- bump to verify reloads take
+        "build": "channels-v45",  # reload marker -- bump to verify reloads take
         "ts": time.time(),
     }
+    # Audit C7: the recurring 'port collision looks like a dead script' trap
+    # (known_pitfalls/midi_port_number_routing_collision) -- device.getPortNumber()
+    # is documented but was never reported, so RX==TX collisions were invisible.
+    _pf = getattr(device, "getPortNumber", None)
+    if callable(_pf):
+        with _suppress(Exception):
+            out["midi_port"] = int(_pf())
+    _af = getattr(device, "isAssigned", None)
+    if callable(_af):
+        with _suppress(Exception):
+            out["device_assigned"] = bool(_af())
+    return out
+
+
+def _jump_to_pattern(n):
+    """Guarded patterns.jumpToPattern (audit V3; upstream FL 26.1.7 law).
+
+    patterns.* indices are 1-based and jumpToPattern(<0) CRASHES FL on
+    26.x. Never hand FL a non-positive index -- reject with a named client
+    error instead (this replaces the bare call sites; restores inside
+    finally/_suppress blocks degrade to a WARNING exactly as before)."""
+    n = int(n)
+    if n < 1:
+        raise _ClientError(
+            "rejected pattern index " + str(n)
+            + ": patterns.* indexes are 1-based and FL 26+ crashes on "
+            "jumpToPattern(<0)", code="bad_index")
+    patterns.jumpToPattern(n)
 
 
 def _tempo_scale():
@@ -702,7 +796,14 @@ def _h_set_tempo(params):
     if bpm < 10.0 or bpm > 999.0:
         raise _ClientError("bpm out of range (10-999)")
     flags = midi.REC_UpdateValue | midi.REC_UpdateControl
-    general.processRECEvent(midi.REC_Tempo, int(bpm * _tempo_scale()), flags)
+    rec_tempo = getattr(midi, "REC_Tempo", None)
+    if rec_tempo is None:
+        # Audit V5: midi.REC_Tempo appears in ZERO pages of the FL manual
+        # mirror -- absent attribute must fail as a NAMED api_unavailable,
+        # not as an opaque AttributeError.
+        raise _ClientError("midi.REC_Tempo not available on this FL build",
+                           code="api_unavailable")
+    general.processRECEvent(rec_tempo, int(bpm * _tempo_scale()), flags)
     return {"bpm": mixer.getCurrentTempo() / _tempo_scale()}
 
 
@@ -979,7 +1080,7 @@ def _channel_dict(i):
         "color": _color_out(_safe_channel_color(i)),
         "type": _channel_type(i),
         "pitch": _safe_channel_pitch(i),
-        **_vol_out(channels.getChannelVolume(i)),
+        **_chan_vol_out(i),
     }
 
 
@@ -991,7 +1092,7 @@ def _channel_list_entry(i):
         "pan": round(channels.getChannelPan(i), 4),
         "mute": bool(channels.isChannelMuted(i)),
         "solo": bool(channels.isChannelSolo(i)),
-        **_vol_out(channels.getChannelVolume(i)),
+        **_chan_vol_out(i),
     }
     if cut:
         e["trunc"] = True
@@ -1002,6 +1103,30 @@ def _h_channel_list(params):
     return _paginate(
         channels.channelCount(), params.get("start", 0), _channel_list_entry, "channels"
     )
+
+
+def _chan_vol_out(i):
+    """Channel volume with the AUTHORITATIVE dB read (audit T7).
+
+    The manual documents channels.getChannelVolume(index, useDb=1); every
+    read here used only the normalized form and DERIVED dB via
+    20*log10(norm/0.8) -- an approximation where an exact API exists.
+    Prefer the API, fall back to the formula, and never emit non-finite."""
+    norm = None
+    db = None
+    try:
+        norm = float(channels.getChannelVolume(i))
+    except Exception:
+        pass
+    try:
+        db = float(channels.getChannelVolume(i, 1))
+    except Exception:
+        db = None
+    if db is None:
+        db = _norm_to_db(norm) if norm is not None else -120.0
+    if norm is None:
+        return {"vol_db": _finite_db(db)}
+    return {"vol_norm": round(norm, 4), "vol_db": _finite_db(db)}
 
 
 def _h_channel_get(params):
@@ -1154,12 +1279,53 @@ def _mixer_db_to_norm(db):
     return 1.0
 
 
+def _finite_db(db):
+    """-Infinity/NaN must never leave this script (audit C1).
+
+    mixer.getTrackVolume(i, 1) returns -inf dB for a fader at normalized
+    0.0 (KB mixer_volume_calibration first row). The protocol JSON encoder
+    REJECTS non-finite floats -- an unencodable response raised inside
+    _send_message escaped OnSysEx unguarded (silent-death class) and took
+    the reply frame with it. Clamp to the floor instead."""
+    try:
+        d = float(db)
+    except (TypeError, ValueError):
+        return -120.0
+    if d != d or d in (float("inf"), float("-inf")):
+        return -120.0
+    return round(max(-120.0, d), 2)
+
+
+def _mixer_norm_to_db(norm):
+    """Inverse of the MEASURED mixer taper (audit T7).
+
+    The old mixer-read fallback used the channel-domain 20*log10(norm/0.8)
+    rule, which disagrees with MIXER_CALIBRATION (0.5 norm = -9.18 dB) by
+    ~5 dB at mid settings. When the dB getter exists it remains the primary
+    path; this is the fallback, and it must be the law we actually measured."""
+    x = max(0.0, min(1.0, float(norm)))
+    pts = MIXER_CALIBRATION
+    for i in range(len(pts) - 1):
+        x0, y0 = pts[i]
+        x1, y1 = pts[i + 1]
+        if x0 <= x <= x1:
+            if y0 == float("-inf"):
+                return -120.0 if x <= x0 else y1
+            if x1 == x0:
+                return y1
+            t = (x - x0) / (x1 - x0)
+            if y1 == float("-inf"):
+                return y0
+            return y0 + t * (y1 - y0)
+    return -120.0
+
+
 def _mixer_vol_out(i, norm):
     try:
         db = mixer.getTrackVolume(i, 1)
     except Exception:
-        db = _norm_to_db(norm)
-    return {"vol_norm": round(norm, 4), "vol_db": round(db, 2)}
+        db = _mixer_norm_to_db(norm)
+    return {"vol_norm": round(norm, 4), "vol_db": _finite_db(db)}
 
 
 def _resolve_vol(p):
@@ -1245,25 +1411,87 @@ def _h_mixer_set_name(p):
     return {"track": t, "name": mixer.getTrackName(t)}
 
 
+_NOTE_RELEASE_RETRIES = 3
+
+
+def _global_channel_for(local_idx):
+    """Resolve a rack-local channel index to FL's indexGlobal (audit C3/T9).
+
+    The manual (midi_scripting.htm) defines channels.midiNoteOn's first
+    argument as indexGlobal, while every other channel address in this file
+    is the LOCAL rack index. The two coincide only on projects with no
+    filtered/deleted channels -- exactly the assumption live batteries on
+    1-2 channel projects could never falsify. Resolve by briefly selecting
+    the target channel (local space) and reading back its global number,
+    then restore the prior selection. Falls back to the raw index with a
+    loud log line when resolution APIs misbehave, matching old behavior."""
+    local_idx = int(local_idx)
+    try:
+        prev = int(channels.channelNumber(1))
+    except Exception:
+        prev = -1
+    try:
+        channels.selectOneChannel(local_idx, False)
+        g = int(channels.channelNumber())
+        if g >= 0:
+            if prev >= 0:
+                with _suppress(Exception):
+                    channels.selectOneChannel(prev, True)
+            return g
+    except Exception as e:
+        print(f"[FLStudioMCP] WARNING: global channel resolution failed for "
+              f"local index {local_idx}: {e} -- using it raw (correct only "
+              "while local and global channel indices coincide)")
+    if prev >= 0:
+        with _suppress(Exception):
+            channels.selectOneChannel(prev, True)
+    return local_idx
+
+
 def _flush_due_notes(now):
-    """Release preview notes whose hold has elapsed (invoked from OnIdle)."""
+    """Release preview notes whose hold has elapsed (invoked from OnIdle).
+
+    Audit C5: a FAILED release used to be dropped from the queue with no
+    retry and no log -- one velocity-0 note-on attempt, and if it raised the
+    note stayed latched on external hardware (e.g. the MicroFreak) forever.
+    Now failed releases stay queued with a retry budget, log loudly, and
+    give up only with an explicit operator-facing error.
+    """
     if not _pending_notes:
         return
     note_off = getattr(channels, "midiNoteOff", None)
     note_on = getattr(channels, "midiNoteOn", None)
     keep = []
-    for channel, note, release_at in _pending_notes:
+    for channel, note, release_at, tries in _pending_notes:
         if now < release_at:
-            keep.append((channel, note, release_at))
+            keep.append((channel, note, release_at, tries))
             continue
+        if note_off is None and note_on is None:
+            print(
+                f"[FLStudioMCP] ERROR: no note-off API on this build -- "
+                f"preview note ch={channel} note={note} CANNOT be released."
+            )
+            continue  # drop entry; retrying an impossible call is noise
         try:
             if note_off is not None:
                 note_off(channel, note)
-            elif note_on is not None:
+            else:
                 # No dedicated off API: velocity-0 note-on is the standard off.
                 note_on(channel, note, 0, -1)
-        except Exception:
-            pass  # best effort -- never break the idle loop
+        except Exception as e:
+            tries += 1
+            if tries < _NOTE_RELEASE_RETRIES:
+                print(
+                    f"[FLStudioMCP] preview-note release failed (try {tries}) "
+                    f"ch={channel} note={note}: {e} -- will retry"
+                )
+                keep.append((channel, note, now + 0.05, tries))
+            else:
+                print(
+                    f"[FLStudioMCP] ERROR: preview note ch={channel} note={note} "
+                    f"COULD NOT BE RELEASED after {tries} tries -- it may be "
+                    "latched; send an all-notes-off for that channel."
+                )
     _pending_notes[:] = keep
 
 
@@ -1284,10 +1512,12 @@ def _h_channel_preview_note(p):
         raise _ClientError(
             "channels.midiNoteOn not available on this FL build", code="api_unavailable"
         )
-    note_on(idx, note, velocity, -1)
-    _pending_notes.append((idx, note, time.time() + hold_ms / 1000.0))
+    gidx = _global_channel_for(idx)
+    note_on(gidx, note, velocity, -1)
+    _pending_notes.append((gidx, note, time.time() + hold_ms / 1000.0, 0))
     return {
         "channel": idx,
+        "global_channel": gidx,
         "note": note,
         "velocity": velocity,
         "hold_ms": hold_ms,
@@ -1300,7 +1530,7 @@ def _h_channel_set_volume(p):
     c = int(p["channel"])
     channels.setChannelVolume(c, _resolve_vol(p))
     out = {"channel": c}
-    out.update(_vol_out(channels.getChannelVolume(c)))
+    out.update(_chan_vol_out(c))
     return out
 
 
@@ -1526,7 +1756,7 @@ def _route_targets(src):
         except Exception:
             active = 0
         if active:
-            e = {"dst": dst, "dst_name": mixer.getTrackName(dst)}
+            e = {"dst": dst, "dst_name": _truncate_name(mixer.getTrackName(dst))}
             lvl = _route_level(src, dst)
             if lvl is not None:
                 e["level"] = lvl
@@ -1564,7 +1794,7 @@ def _channel_route_entry(i):
         "target_mixer_track": tgt,
         "target_name": (mixer.getTrackName(tgt) if valid else None),
         "type": _channel_type(i),
-        **_vol_out(channels.getChannelVolume(i)),
+        **_chan_vol_out(i),
     }
     if cut:
         e["trunc"] = True
@@ -1573,15 +1803,28 @@ def _channel_route_entry(i):
 
 def _h_mixer_get_free_track(p):
     start = int(p.get("start", 1))
+    # Audit C9: mixer.getFreeTrack has ZERO manual coverage; when it hands
+    # back an in-use track, reporting it as 'free' silently overwrites the
+    # user's routing. Verify its claim (default/blank name AND no plugins)
+    # before trusting it; otherwise fall back to the heuristic scan and say
+    # which method produced the answer.
     try:
-        t = mixer.getFreeTrack()
-        if t >= start:
-            return {"track": int(t)}
+        t = int(mixer.getFreeTrack())
     except Exception:
-        pass
+        t = -1
+    if t >= start and t != 0:
+        try:
+            name = mixer.getTrackName(t) or ""
+            if hasattr(plugins, "getPluginCount"):
+                used = int(plugins.getPluginCount(t)) > 0
+            else:
+                used = False
+            if (not name or name.startswith(("Insert ", "Track "))) and not used:
+                return {"track": t, "source": "getFreeTrack+verified"}
+        except Exception:
+            pass
 
     # Fallback manual scan if getFreeTrack is unavailable or returned a lower track
-    start = int(p.get("start", 1))
     for i in range(start, mixer.trackCount()):
         if i == 0:
             continue
@@ -1593,8 +1836,10 @@ def _h_mixer_get_free_track(p):
                 continue
         except Exception:
             pass
-        return {"track": i}
-    return {"track": None}
+        return {"track": i, "source": "heuristic-scan",
+                "note": "name+plugin-count scan; undocumented getFreeTrack "
+                        "result was absent or unverified"}
+    return {"track": None, "source": "scan-complete"}
 
 
 def _h_channel_routing_summary(p):
@@ -1824,7 +2069,7 @@ def _h_arrange_new_pattern(p):
         idx = -1
     if not isinstance(idx, int) or idx < 1:
         idx = patterns.patternCount() + 1
-    patterns.jumpToPattern(idx)
+    _jump_to_pattern(idx)
     try:
         patterns.setPatternName(idx, name)
     except Exception as e:
@@ -1843,7 +2088,7 @@ def _h_arrange_clone_pattern(p):
     count before/after + the clone's selected index so we can see what FL did."""
     src = int(p["src"])
     new_name = p.get("new_name", "CLONE")
-    patterns.jumpToPattern(src)
+    _jump_to_pattern(src)
     before = patterns.patternCount()
     try:
         patterns.clonePattern(src)
@@ -1883,7 +2128,7 @@ def _h_ensure_piano_roll(p):
 
     if pattern is not None:
         try:
-            patterns.jumpToPattern(int(pattern))
+            _jump_to_pattern(int(pattern))
             out["pattern"] = patterns.patternNumber()
         except Exception as e:
             out["pattern_error"] = f"jumpToPattern: {e}"
@@ -2004,9 +2249,19 @@ def _h_channel_get_steps(p):
         if target_pattern < 1 or target_pattern > patterns.patternCount():
             raise _ClientError("pattern index out of range")
         if previous_pattern != target_pattern:
-            patterns.jumpToPattern(target_pattern)
+            _jump_to_pattern(target_pattern)
     grid, vel, pan, shift, rep = [], [], [], [], []
     rel, modx, pitch = [], [], []
+    # Audit C2/T5: a failed read used to append a PLAUSIBLE VALUE (grid False,
+    # velocity 0.8, pan 0.0...). That payload is the snapshot every step write
+    # rolls back FROM -- so one failed read turned rollback into 'write
+    # invented rows over the user's real step data'. Failed reads are now
+    # null + counted; the server refuses to snapshot/restore from them.
+    read_errors = {}
+
+    def _read_fail(param):
+        read_errors[param] = read_errors.get(param, 0) + 1
+
     p_release = getattr(midi, "pRelease", None)
     p_modx = getattr(midi, "pModX", None)
     p_pitch = getattr(midi, "pPitch", None) or getattr(midi, "pFinePitch", None)
@@ -2021,35 +2276,40 @@ def _h_channel_get_steps(p):
             try:
                 g = bool(channels.getGridBit(idx, s))
             except Exception:
-                g = False
+                g = None
+                _read_fail("grid")
             grid.append(g)
 
             try:
                 raw_v = channels.getStepParam(idx, _pat, s, midi.pVelocity, 0, 0)
                 v = round(float(raw_v) / 127.0, 4)
             except Exception:
-                v = 0.8
+                v = None
+                _read_fail("vel")
             vel.append(v)
 
             try:
                 raw_pan = channels.getStepParam(idx, _pat, s, midi.pPan, 0, 0)
                 pn = round(float(raw_pan) / 64.0 - 1.0, 4)
             except Exception:
-                pn = 0.0
+                pn = None
+                _read_fail("pan")
             pan.append(pn)
 
             try:
                 raw_shift = channels.getStepParam(idx, _pat, s, midi.pShift, 0, 0)
                 sh = round(float(raw_shift) / 240.0, 4)
             except Exception:
-                sh = 0.0
+                sh = None
+                _read_fail("shift")
             shift.append(sh)
 
             if p_repeat is not None:
                 try:
                     rp = int(channels.getStepParam(idx, _pat, s, p_repeat, 0, 0))
                 except Exception:
-                    rp = 0
+                    rp = None
+                    _read_fail("rep")
             else:
                 rp = None
             rep.append(rp)
@@ -2059,7 +2319,8 @@ def _h_channel_get_steps(p):
                     raw_rel = channels.getStepParam(idx, _pat, s, p_release, 0, 0)
                     rel.append(round(float(raw_rel) / 127.0, 4))
                 except Exception:
-                    rel.append(0.0)
+                    rel.append(None)
+                    _read_fail("release")
             else:
                 rel.append(None)
 
@@ -2068,7 +2329,8 @@ def _h_channel_get_steps(p):
                     raw_modx = channels.getStepParam(idx, _pat, s, p_modx, 0, 0)
                     modx.append(round(float(raw_modx) / 255.0, 4))
                 except Exception:
-                    modx.append(0.0)
+                    modx.append(None)
+                    _read_fail("mod")
             else:
                 modx.append(None)
 
@@ -2077,7 +2339,8 @@ def _h_channel_get_steps(p):
                     raw_pitch = channels.getStepParam(idx, _pat, s, p_pitch, 0, 0)
                     pitch.append(int(raw_pitch))
                 except Exception:
-                    pitch.append(0)
+                    pitch.append(None)
+                    _read_fail("pitch")
             else:
                 pitch.append(None)
 
@@ -2092,6 +2355,8 @@ def _h_channel_get_steps(p):
             "release": rel,
             "mod": modx,
             "pitch": pitch,
+            "read_errors": read_errors,
+            "read_complete": not read_errors,
             "capabilities": {
                 "release": bool(p_release is not None),
                 "mod": bool(p_modx is not None),
@@ -2102,7 +2367,7 @@ def _h_channel_get_steps(p):
     finally:
         if previous_pattern is not None and previous_pattern != patterns.patternNumber():
             with _suppress(Exception):
-                patterns.jumpToPattern(previous_pattern)
+                _jump_to_pattern(previous_pattern)
 
 
 def _h_pattern_get(p):
@@ -2143,7 +2408,7 @@ def _h_pattern_select(p):
     idx = int(p["index"])
     if idx < 1 or idx > patterns.patternCount():
         raise _ClientError("pattern index out of range")
-    patterns.jumpToPattern(idx)
+    _jump_to_pattern(idx)
     return {"selected": patterns.patternNumber()}
 
 
@@ -2263,11 +2528,16 @@ def _h_mixer_get_slot(p):
     name = plugins.getPluginName(track, slot) if valid else ""
     mix = round(mixer.getPluginMixLevel(track, slot), 4)
     mute_fn = getattr(plugins, "getPluginMuteState", None)
-    enabled = True
+    # Audit C9: getPluginMuteState has ZERO manual coverage. Reporting the
+    # default True when the API is absent or errored FABRICATES a fact
+    # ('enabled') -- null + reason is the honest shape.
+    enabled = None
     if mute_fn is not None:
-        with _suppress(Exception):
+        try:
             enabled = not bool(mute_fn(track, slot))
-    return {
+        except Exception:
+            enabled = None
+    out_slot = {
         "track": track,
         "slot": slot,
         "valid": valid,
@@ -2275,6 +2545,12 @@ def _h_mixer_get_slot(p):
         "mix": mix,
         "enabled": enabled,
     }
+    if enabled is None:
+        out_slot["enabled_note"] = (
+            "mute state not readable on this build (plugins.getPluginMuteState "
+            "absent or raised) -- UNKNOWN, not enabled"
+        )
+    return out_slot
 
 
 def _h_mixer_set_slot_mix(p):
@@ -2531,8 +2807,12 @@ def _h_get_time_sig(p):
             if num8 * (ppq // 2) == ppb:
                 return {"numerator": num8, "denominator": 8}
         return {"numerator": 4, "denominator": 4}
-    except Exception:
-        return {"numerator": 4, "denominator": 4}
+    except Exception as e:
+        # C9-class: don't present a guessed 4/4 as a measured reading.
+        return {"numerator": 4, "denominator": 4, "readback_ok": False,
+                "note": ("time signature unreadable ("
+                         + type(e).__name__ + ": " + str(e)
+                         + "); 4/4 assumed, NOT measured")}
 
 
 def _h_set_time_sig(p):
@@ -2540,12 +2820,26 @@ def _h_set_time_sig(p):
     den = int(p["denominator"])
     if den not in (4, 8):
         raise _ClientError("time signature denominator must be 4 or 8 for safe readback")
+    # Audit V4: the manual grades setNumerator/setDenominator under a newer
+    # MIDI scripting API (v38 era) -- above the ceiling of this fork's
+    # measured 21.2.2 evidence. Absent API must be named, never an opaque
+    # AttributeError, and never claimed as measured.
+    setnum = getattr(general, "setNumerator", None)
+    setden = getattr(general, "setDenominator", None)
+    if setnum is None or setden is None:
+        raise _ClientError(
+            "general.setNumerator/setDenominator not available on this FL "
+            "build (needs a newer MIDI scripting API than the measured 21.2.2)",
+            code="api_unavailable")
     try:
-        general.setNumerator(num)
-        general.setDenominator(den)
+        setnum(num)
+        setden(den)
     except Exception as e:
         raise _ClientError(f"failed to set time signature: {e}") from e
-    return _h_get_time_sig({})
+    out_ts = _h_get_time_sig({})
+    out_ts["readback_ok"] = bool(out_ts.get("numerator") == num
+                                 and out_ts.get("denominator") == den)
+    return out_ts
 
 
 def _h_channel_set_steps(p):
@@ -2556,8 +2850,13 @@ def _h_channel_set_steps(p):
         raise _ClientError("pattern index out of range")
     previous_pattern = patterns.patternNumber()
     if previous_pattern != target_pattern:
-        patterns.jumpToPattern(target_pattern)
-    pat_idx = max(0, target_pattern - 1)
+        _jump_to_pattern(target_pattern)
+    # Audit C4: the old `target_pattern - 1` wrote step PARAMETERS one
+    # pattern BELOW the target while the readback and every pattern_* call
+    # use the 1-based pattern number -- writes and their verify/rollback
+    # disagreed about the target. FL pattern numbers are 1-based; pass the
+    # number through unchanged.
+    pat_idx = target_pattern
     failures = []
     p_release = getattr(midi, "pRelease", None)
     p_modx = getattr(midi, "pModX", None)
@@ -2574,7 +2873,7 @@ def _h_channel_set_steps(p):
                 vel = max(0, min(127, int(float(s_info["velocity"]) * 127.0)))
                 try:
                     channels.setStepParameterByIndex(
-                        idx, pat_idx, step_idx, midi.pVelocity, vel, True
+                        idx, pat_idx, step_idx, midi.pVelocity, vel, False,
                     )
                 except Exception as e:
                     failures.append({"step": step_idx, "param": "velocity", "error": str(e)})
@@ -2582,7 +2881,7 @@ def _h_channel_set_steps(p):
             if "pan" in s_info and s_info["pan"] is not None:
                 pan = max(0, min(128, int((float(s_info["pan"]) + 1.0) * 64.0)))
                 try:
-                    channels.setStepParameterByIndex(idx, pat_idx, step_idx, midi.pPan, pan, True)
+                    channels.setStepParameterByIndex(idx, pat_idx, step_idx, midi.pPan, pan, False)
                 except Exception as e:
                     failures.append({"step": step_idx, "param": "pan", "error": str(e)})
 
@@ -2590,7 +2889,7 @@ def _h_channel_set_steps(p):
                 shift = max(0, min(240, int(float(s_info["shift"]) * 240.0)))
                 try:
                     channels.setStepParameterByIndex(
-                        idx, pat_idx, step_idx, midi.pShift, shift, True
+                        idx, pat_idx, step_idx, midi.pShift, shift, False,
                     )
                 except Exception as e:
                     failures.append({"step": step_idx, "param": "shift", "error": str(e)})
@@ -2602,7 +2901,7 @@ def _h_channel_set_steps(p):
                 else:
                     try:
                         channels.setStepParameterByIndex(
-                            idx, pat_idx, step_idx, p_repeat, rep, True
+                            idx, pat_idx, step_idx, p_repeat, rep, False,
                         )
                     except Exception as e:
                         failures.append({"step": step_idx, "param": "repeat", "error": str(e)})
@@ -2614,7 +2913,7 @@ def _h_channel_set_steps(p):
                     release = max(0, min(127, int(float(s_info["release"]) * 127.0)))
                     try:
                         channels.setStepParameterByIndex(
-                            idx, pat_idx, step_idx, p_release, release, True
+                            idx, pat_idx, step_idx, p_release, release, False,
                         )
                     except Exception as e:
                         failures.append({"step": step_idx, "param": "release", "error": str(e)})
@@ -2625,7 +2924,7 @@ def _h_channel_set_steps(p):
                 else:
                     mod = max(0, min(255, int(float(s_info["mod"]) * 255.0)))
                     try:
-                        channels.setStepParameterByIndex(idx, pat_idx, step_idx, p_modx, mod, True)
+                        channels.setStepParameterByIndex(idx, pat_idx, step_idx, p_modx, mod, False)
                     except Exception as e:
                         failures.append({"step": step_idx, "param": "mod", "error": str(e)})
 
@@ -2636,20 +2935,37 @@ def _h_channel_set_steps(p):
                     pitch = int(s_info["pitch"])
                     try:
                         channels.setStepParameterByIndex(
-                            idx, pat_idx, step_idx, p_pitch, pitch, True
+                            idx, pat_idx, step_idx, p_pitch, pitch, False,
                         )
                     except Exception as e:
                         failures.append({"step": step_idx, "param": "pitch", "error": str(e)})
 
-        with _suppress(Exception):
+        graph_refresh_error = None
+        try:
             channels.updateGraphEditor()
+        except Exception as e:
+            # Audit V6: silent swallow meant FL's step GUI can sit stale while
+            # the write landed -- surface it instead of hiding it.
+            graph_refresh_error = str(e)
+            print(f"[FLStudioMCP] WARNING: updateGraphEditor failed after set_steps: {e}")
         out = _h_channel_get_steps({"channel": idx, "pattern": target_pattern})
         if failures:
             out["step_param_failures"] = failures
+        if graph_refresh_error:
+            out["graph_refresh_error"] = graph_refresh_error
         return out
     finally:
+        # Audit C8: a raise HERE replaced the handler's successful
+        # return with internal_error (mirror image of the swallow class). The
+        # write already landed; degrade to a loud log line instead.
         if previous_pattern != patterns.patternNumber():
-            patterns.jumpToPattern(previous_pattern)
+            try:
+                _jump_to_pattern(previous_pattern)
+            except Exception as e:
+                print(
+                    f"[FLStudioMCP] WARNING: set_steps could not restore "
+                    f"pattern {previous_pattern}: {e}"
+                )
 
 
 _HANDLERS = {
