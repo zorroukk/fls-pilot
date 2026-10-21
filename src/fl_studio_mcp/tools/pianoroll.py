@@ -24,7 +24,16 @@ class PianoRollNote(BaseModel):
     time_bars: float = Field(0.0, ge=0.0, description="Start, in bars from the pattern start.")
     length_bars: float = Field(1.0, gt=0.0, description="Duration in bars.")
     velocity: float = Field(
-        100 / 127.0, ge=0.0, le=1.0, description="0.0-1.0 (0.787 ~= MIDI velocity 100)."
+        100 / 127.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "0.0-1.0 (0.787 ~= MIDI velocity 100) AS DOCUMENTED -- but MEASURED "
+            "on FL 21.2.2 per-note velocity through this pyscript path does NOT "
+            "persist: every saved note lands at FL's default 120. Treat dynamics "
+            "here as advisory; shape them via the Piano roll velocity lane or an "
+            "FLP byte-patch. See known_pitfalls/velocity_flpianoroll."
+        ),
     )
 
 
@@ -64,6 +73,12 @@ def _target_payload(channel: int | None, pattern: int | None) -> dict:
 
 
 def _ensure_piano_roll(bridge, channel: int | None, pattern: int | None) -> dict:
+    if safety.is_dry_run():
+        # Audit N5: dry-run must be DRY. Retargeting the editor (pattern +
+        # channel selection) is persisted project state, not a preview --
+        # it used to fire before the dry-run check inside safe_piano_roll_write.
+        return {"ok": True, "dry_run": True,
+                "note": "piano-roll retarget skipped (dry run)"}
     return bridge.call(protocol.CMD_ENSURE_PIANO_ROLL, _target_payload(channel, pattern))
 
 
@@ -780,8 +795,8 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(annotations={"title": "Apply Piano roll velocity ramp", **_WR})
     def fl_piano_velocity_ramp(
-        start: Annotated[float, Field(ge=0.0, le=1.0, description="Start velocity 0..1.")],
-        end: Annotated[float, Field(ge=0.0, le=1.0, description="End velocity 0..1.")],
+        start: Annotated[float, Field(ge=0.0, le=1.0, description="Start velocity 0..1 (ADVISORY -- see velocity_flpianoroll pitfall: does not persist on 21.2.2).")],
+        end: Annotated[float, Field(ge=0.0, le=1.0, description="End velocity 0..1 (ADVISORY -- see velocity_flpianoroll pitfall: does not persist on 21.2.2).")],
         channel: Annotated[
             int | None,
             Field(ge=0, description="Optional channel-rack index to retarget before editing."),

@@ -369,6 +369,26 @@ def register(mcp: FastMCP) -> None:
         Safety: Write-Safe with Rollback.
         """
         bridge = get_bridge()
+        # Audit T3: arbitrary {src,dst} pairs used to reach the wire unchecked.
+        _seen_routes: dict = {}
+        for i, r in enumerate(routes):
+            if "src" not in r or "dst" not in r:
+                return {"ok": False, "error": f"route {i} missing src/dst: {r!r}"}
+            src_i, dst_i = int(r["src"]), int(r["dst"])
+            if src_i == dst_i:
+                return {"ok": False, "error": f"route {i}: src == dst ({src_i})"}
+            for label, v in (("src", src_i), ("dst", dst_i)):
+                err = mixer_track_error(bridge, v, purpose=f"cleanup route {i} {label}")
+                if err is not None:
+                    return err
+            key = (src_i, dst_i)
+            want = bool(r.get("enabled", True))
+            if key in _seen_routes and _seen_routes[key] != want:
+                return {"ok": False,
+                        "error": f"contradictory duplicate route {key}: enabled {want} "
+                                 f"after {_seen_routes[key]} in the same batch"}
+            _seen_routes[key] = want
+
         writes = []
 
         for r in routes:
@@ -414,6 +434,41 @@ def register(mcp: FastMCP) -> None:
         Safety: Write-Safe with Rollback.
         """
         bridge = get_bridge()
+        # Audit T3: this batch entry validated NOTHING while the single-track
+        # fl_group_tracks rejects Master buses. bus_track=0 emitted `src->0 ON`
+        # then `src->0 OFF` for every pair (killing audible master sends behind
+        # an ok:True). Mirror fl_group_tracks' guards here.
+        _seen_src: dict[int, int] = {}
+        _seen_pairs: set = set()
+        for b in buses:
+            if b.get("bus_track") is None:
+                return {"ok": False, "error": "bus config missing bus_track: " + repr(b)}
+            _bus = int(b["bus_track"])
+            err = mixer_track_error(bridge, _bus, allow_master=False, purpose="bus layout bus track")
+            if err is not None:
+                return err
+            for _s in b.get("source_tracks", []) or []:
+                _s = int(_s)
+                if _s == 0:
+                    return {"ok": False,
+                            "error": f"source track 0 (Master) cannot be routed into bus {_bus}"}
+                if _s == _bus:
+                    continue  # self-route: the write loop already excludes it
+                err = mixer_track_error(bridge, _s, allow_master=False,
+                                         purpose="bus layout source track")
+                if err is not None:
+                    return err
+                _owner = _seen_src.get(_s)
+                if _owner is not None and _owner != _bus:
+                    return {"ok": False,
+                            "error": (f"source {_s} assigned to two buses ({_owner} and "
+                                      f"{_bus}) -- exclusive sends contradict")}
+                _seen_src[_s] = _bus
+                if (_s, _bus) in _seen_pairs:
+                    return {"ok": False,
+                            "error": f"duplicate route {_s}->{_bus} in one layout"}
+                _seen_pairs.add((_s, _bus))
+
         writes = []
 
         for b in buses:
