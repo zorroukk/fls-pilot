@@ -46,5 +46,8 @@ jobs:
       - name: Run mock bridge smoke
         run: python tests/test_bridge_mock.py
 
+      - name: Verify every test file is collectable (audit R2 gate)
+        run: pytest --collect-only -q
+
       - name: Run offline test suite
         run: pytest

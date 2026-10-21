@@ -7,8 +7,11 @@ release line.
 
 ## Reporting A Vulnerability
 
-Please report security issues privately by email or through GitHub private
-vulnerability reporting when it is available for this repository.
+Please report security issues privately through GitHub's **private
+vulnerability reporting** (Security tab → "Report a vulnerability") on this
+repository, or by opening a minimal issue that asks the maintainer
+(@zorroukk) for a private channel. Do not include exploit details in a public
+issue.
 
 Do not open public issues for vulnerabilities that could expose user systems,
 local file paths, credentials, MIDI bridge state, or unsafe host-automation

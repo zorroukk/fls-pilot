@@ -39,3 +39,12 @@ htmlcov/
 
 # Bridge runtime data (don't commit the queue)
 flstudio_mcp_bridge/
+
+
+# Runtime forensics & scratch (audits R8/D10: these trees hold absolute host
+# paths and tracebacks; 'git add .' must never swallow them)
+runtime-logs/
+scratch/
+*.log
+*.log.*
+*.tmp

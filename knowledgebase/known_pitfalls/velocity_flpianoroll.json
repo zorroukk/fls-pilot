@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-21",
+  "author": "hardened-fork audit sweep (2026-10-21) + live 2026-09-21 battery",
+  "topic": "flpianoroll per-note velocity (0..1) is documented but silently lands as FL's default 120 on FL 21.2.2",
+  "affected": [
+    "pyscript_gen.render_apply_script",
+    "tools/pianoroll PianoRollNote.velocity",
+    "velocity_ramp action",
+    "tools/audio bridge_notes handoff"
+  ],
+  "confidence_level": "measured_once",
+  "evidence": {
+    "machine": "Windows 11, FL Studio Producer Edition v21.2.2 build 3914",
+    "symptom": "apply_notes wrote 32 notes with velocity floats 0.818-0.850; the owner-saved .flp dumped byte-exact (flp_notes.py) showed EVERY note velocity = 120 (FL default). The manual (pianoroll_scripting_api.htm) documents velocity 0.0..1.0 with 'MIDI velocity of 127 corresponds to FL velocity of 1.0', so the API CLAIMS support; this build drops it.",
+    "cure": "treat per-note dynamics as advisory through this path: shape velocity in the Piano roll velocity lane, or byte-patch the SAVED .flp note-event velocity field after the owner saves (flp_notes.py patch), or await a re-probe on a newer FL build",
+    "cross_reference": "vault lane log entry 2026-09-21 01:58 (field incident); docs/API_CAPABILITY_AUDIT.md evidence grading"
+  },
+  "laws": [
+    "manual-documented != measured-working on the target build: grade features as DOCUMENTED+MEASURED vs DOCUMENTED-ONLY",
+    "readback of note velocity through the controller is api-limited -- 'ok:true count:N' proves serialization, NOT musical result",
+    "when the user asks for dynamics via agent writes, say which layer will actually carry them"
+  ],
+  "reproduction": "fl_write_piano_roll_notes 8 notes with velocity 0.5 and 0.9 alternating; Ctrl+S in FL; dump the .flp note records: all velocities read 120",
+  "open_questions": [
+    "does a newer FL scripting API version persist 0..1 velocity (needs live 25.x/26.x rig)",
+    "is the drop in flp.Note assignment or in score serialization (undetectable from inside the script sandbox)"
+  ],
+  "affected_api": [
+    "pyscript_gen.render_apply_script",
+    "tools/pianoroll PianoRollNote.velocity",
+    "velocity_ramp action",
+    "tools/audio bridge_notes handoff"
+  ],
+  "next_recommended_action": "Treat the documented behaviour as build-specific; re-probe on your FL build and report the result.",
+  "source_method": "live FL Studio session measurements + offline reproduction scripts (2026-09/10 hardening lane)",
+  "context": "flpianoroll per-note velocity (0..1) is documented but silently lands as FL's default 120 on FL 21.2.2",
+  "observation": {
+    "machine": "Windows 11, FL Studio Producer Edition v21.2.2 build 3914",
+    "symptom": "apply_notes wrote 32 notes with velocity floats 0.818-0.850; the owner-saved .flp dumped byte-exact (flp_notes.py) showed EVERY note velocity = 120 (FL default). The manual (pianoroll_scripting_api.htm) documents velocity 0.0..1.0 with 'MIDI velocity of 127 corresponds to FL velocity of 1.0', so the API CLAIMS support; this build drops it.",
+    "cure": "treat per-note dynamics as advisory through this path: shape velocity in the Piano roll velocity lane, or byte-patch the SAVED .flp note-event velocity field after the owner saves (flp_notes.py patch), or await a re-probe on a newer FL build",
+    "cross_reference": "vault lane log entry 2026-09-21 01:58 (field incident); docs/API_CAPABILITY_AUDIT.md evidence grading"
+  },
+  "result": "measured_once - documented in this entry and enforced by code guards where applicable",
+  "tested_values": [
+    "Windows 11, FL Studio Producer Edition v21.2.2 build 3914",
+    "see reproduction field"
+  ]
+}

@@ -1,7 +1,7 @@
 # Live Audition APIs (preview note, track arm, loop mode)
 
 **Date**: 2026-09-19
-**Agent/Author**: Hermes (experimental profile) / Nicholas
+**Agent/Author**: field forensics (this fork)
 **Topic**: Availability and behavior of the three FL device APIs backing the Live Audition Pack
 **Affected File/API**: `protocol.CMD_CHANNEL_PREVIEW_NOTE` (`channels.midiNoteOn`/`midiNoteOff`),
 `protocol.CMD_MIXER_SET_ARM` (`mixer.armTrack`/`isTrackArmed`),

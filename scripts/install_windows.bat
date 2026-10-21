@@ -12,6 +12,10 @@ REM  If your FL data folder is elsewhere, edit FL_SETTINGS below.
 REM ============================================================================
 setlocal enabledelayedexpansion
 
+REM R6 fix: %%USERPROFILE%%\Documents is a GHOST on OneDrive-KFM/localized
+REM Windows (known_pitfalls/windows_localized_documents_breaks_script_scan).
+REM The real root is resolved via User Shell Folders below; the literal path
+REM stays only as a last fallback.
 set "FL_SETTINGS=%USERPROFILE%\Documents\Image-Line\FL Studio\Settings"
 set "HW_TARGET=%FL_SETTINGS%\Hardware\FLStudioMCP"
 set "SCRIPT_DIR=%~dp0"
@@ -19,16 +23,32 @@ set "REPO_ROOT=%SCRIPT_DIR%.."
 
 echo.
 echo [1/4] Installing FL Studio controller script...
+REM Resolve the REAL Documents root the way pyscript_gen does (HKCU User Shell
+REM Folders / Personal) -- FL ignores literal %%USERPROFILE%%\Documents on
+REM OneDrive/localized machines.
+set "PERSONAL="
+for /f "delims=" %%D in ('powershell -NoProfile -Command "(Get-ItemProperty -Path ''HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'' -Name Personal).Personal"') do set "PERSONAL_RAW=%%D"
+if defined PERSONAL_RAW for /f "delims=" %%E in ('powershell -NoProfile -Command "[Environment]::ExpandEnvironmentStrings(''%PERSONAL_RAW%'')"') do set "PERSONAL=%%E"
+if defined PERSONAL if exist "%PERSONAL%\Image-Line\FL Studio\Settings\Hardware" set "FL_SETTINGS=%PERSONAL%\Image-Line\FL Studio\Settings"
 if not exist "%FL_SETTINGS%\Hardware" (
   echo   FL Studio Settings\Hardware folder not found at:
   echo     %FL_SETTINGS%\Hardware
   echo   Open FL Studio at least once, then re-run this script.
+  echo   ^(Moved your FL user-data folder via Options ^> File settings? Set
+  echo     FL_SETTINGS at the top of this script.^)
   exit /b 1
 )
 if not exist "%HW_TARGET%" mkdir "%HW_TARGET%"
 copy /Y "%REPO_ROOT%\fl_controller\FLStudioMCP\device_FLStudioMCP.py" "%HW_TARGET%\" >nul
 if errorlevel 1 ( echo   Copy failed. Aborting. & exit /b 1 )
-echo   Installed to %HW_TARGET%
+REM C12 fix: verify byte-identity after the copy -- a stale deployed script is
+REM the documented 'Unknown command / dead bytes' trap (fl_ping also flags
+REM marker drift once the daemon answers).
+fc /b "%REPO_ROOT%\fl_controller\FLStudioMCP\device_FLStudioMCP.py" "%HW_TARGET%\device_FLStudioMCP.py" >nul
+if errorlevel 1 ( echo   VERIFY FAILED: deployed copy differs from repo. Aborting. & exit /b 1 )
+echo   Installed and byte-verified in %HW_TARGET%
+echo   NOTE: with FL running, fl_ping must report build "channels-v45"; an older
+echo   marker means FL still runs the old script (reload it or restart FL).
 
 echo.
 echo [2/4] Installing the MCP server (editable)...
