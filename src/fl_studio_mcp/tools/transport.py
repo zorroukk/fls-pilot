@@ -7,6 +7,7 @@ transport concept so we expose it here for discoverability.
 
 from __future__ import annotations
 
+import os
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -335,6 +336,30 @@ def _ping_bridge(bridge) -> dict:
         "port_to_fl": protocol.port_to_fl_name(),
         "port_from_fl": protocol.port_from_fl_name(),
     }
+    # Audit D8: a TCPBridge with no daemon behind it used to return the same
+    # 'FL Studio is closed / controller not selected' text as a real FL-side
+    # problem -- the daemon went unmentioned and operators re-tinkered F10
+    # while the actual cure was 'start the daemon'. Say which layer failed.
+    if hasattr(bridge, "host"):  # TCPBridge
+        try:
+            bridge._rpc({"op": "health"}, timeout=5.0)
+        except FLNotRunning:
+            pass  # health never raises this; defensive only
+        except Exception as e:  # FLPortMissing / FLTimeout / FLBridgeError
+            layer = (
+                "the fl-studio-mcp DAEMON is unreachable -- start it "
+                "(run `fl-studio-mcp-daemon` in a normal terminal)"
+                if type(e).__name__ == "FLPortMissing"
+                else "the daemon answered the health request incorrectly or not at all"
+            )
+            return {
+                "alive": False,
+                "reason": (
+                    f"{layer} (FL Studio status unknown). {e}"
+                ),
+                "failed_layer": "daemon",
+                **port_info,
+            }
     age = bridge.heartbeat_age()
     if age is None:
         return {
@@ -343,6 +368,7 @@ def _ping_bridge(bridge) -> dict:
             "FLStudioMCP controller is not selected, or the "
             "loopMIDI / IAC output port number does not match "
             "the input port number in FL's MIDI Settings.",
+            "failed_layer": "fl-controller",
             **port_info,
         }
     if age > protocol.HEARTBEAT_STALE_SECONDS:
@@ -350,17 +376,61 @@ def _ping_bridge(bridge) -> dict:
             "alive": False,
             "reason": f"Heartbeat is {age:.1f}s old (stale > "
             f"{protocol.HEARTBEAT_STALE_SECONDS:.0f}s). FL may "
-            f"be frozen or the controller stopped responding.",
+            f"be frozen or the controller stopped responding. "
+            f"If FL itself looks healthy, suspect the bridge: "
+            f"restart the daemon (its MIDI reader thread can die "
+            f"while the TCP side keeps answering).",
+            "failed_layer": "fl-controller-or-bridge-reader",
             "heartbeat_age_seconds": round(age, 2),
             **port_info,
         }
     data = bridge.call(protocol.CMD_PING)
-    return {
+    out = {
         "alive": True,
         "heartbeat_age_seconds": round(age, 2),
         **port_info,
         **data,
     }
+    # --- version assurance (audits V1/V2/C12): the controller always shipped
+    # fl_version but NOTHING consumed it. Compare now; warn, never brick --
+    # 114/166 tools ride documented APIs and will work on unlisted builds.
+    out.update(protocol.fl_version_assurance(data.get("fl_version")))
+    out["protocol_version_match"] = (
+        data.get("protocol_version") == protocol.PROTOCOL_VERSION
+    )
+    if not out["protocol_version_match"]:
+        out["protocol_version_warning"] = (
+            f"controller protocol {data.get('protocol_version')!r} != server "
+            f"{protocol.PROTOCOL_VERSION!r} -- redeploy the controller script "
+            "(scripts/install_windows.bat / install_macos.sh) and reload it in FL."
+        )
+    marker = str(data.get("build") or data.get("controller_build") or "")
+    out["controller_build"] = marker
+    out["controller_build_expected"] = protocol.EXPECTED_CONTROLLER_BUILD
+    if marker != protocol.EXPECTED_CONTROLLER_BUILD:
+        out["controller_build_stale"] = True
+        out["controller_build_warning"] = (
+            f"deployed controller reports {marker!r} but this server expects "
+            f"{protocol.EXPECTED_CONTROLLER_BUILD!r} -- FL is running an OLD "
+            "copy of the script (deploy drift). Reinstall the controller and "
+            "reload/restart FL before trusting new commands."
+        )
+    # Port self-report (audit C7): the controller can state its assigned MIDI
+    # port via device.getPortNumber(); with FLSTUDIO_MCP_EXPECTED_MIDI_PORT set
+    # a collision/wrong-binding stops looking like a dead script.
+    expected_port = os.environ.get("FLSTUDIO_MCP_EXPECTED_MIDI_PORT")
+    if expected_port and data.get("midi_port") is not None:
+        try:
+            out["midi_port_match"] = int(data["midi_port"]) == int(expected_port)
+        except (TypeError, ValueError):
+            out["midi_port_match"] = False
+        if out["midi_port_match"] is False:
+            out["midi_port_warning"] = (
+                f"controller bound to MIDI port {data.get('midi_port')!r} but "
+                f"expected {expected_port!r} (FLSTUDIO_MCP_EXPECTED_MIDI_PORT) "
+                "-- check F10: RX input number must equal the TX output number."
+            )
+    return out
 
 
 def _bridge_call(bridge, command: str, params: dict | None = None):

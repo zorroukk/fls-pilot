@@ -913,15 +913,29 @@ def plan_fixes(snapshot, target_peak_db=DEFAULT_TARGET_PEAK_DB):
     from .. import protocol
 
     res = diagnose(snapshot)
+    # Audit R1: findings used to be mapped back to tracks BY NAME -- duplicate
+    # track names (common after copy/paste) double-trimmed one track and never
+    # trimmed the other, and a USER track literally named "Master" was skipped.
+    # Clip findings already embed the mixer index in proposed_fix.args.track:
+    # map by INDEX; the true Master is index 0, not the string "Master".
     by_name = {t.get("name"): t for t in snapshot.get("tracks", [])}
+    by_index = {t.get("index"): t for t in snapshot.get("tracks", [])}
     plans, notes = [], list(res["notes"])
     pid = 0
 
+    def _finding_track(f):
+        idx = ((f.get("proposed_fix") or {}).get("args") or {}).get("track")
+        if isinstance(idx, int):
+            return by_index.get(idx)
+        return by_name.get(f.get("track"))
+
     for f in res["findings"]:
-        if f["rule"] != "clipping" or not f["track"] or f["track"] == "Master":
+        if f["rule"] != "clipping" or not f["track"]:
             continue
-        t = by_name.get(f["track"])
-        if not t or t.get("vol_db") is None or t.get("peak_db") is None:
+        t = _finding_track(f)
+        if t is None or t.get("index") == 0:
+            continue  # true Master: handled via source trims + note below
+        if t.get("vol_db") is None or t.get("peak_db") is None:
             continue
         trim = round(t["peak_db"] - target_peak_db, 1)  # how far to come down
         if trim <= 0:
@@ -964,7 +978,12 @@ def plan_fixes(snapshot, target_peak_db=DEFAULT_TARGET_PEAK_DB):
         )
 
     if any(
-        f["rule"] in ("clipping", "headroom") and f["track"] == "Master" for f in res["findings"]
+        f["rule"] in ("clipping", "headroom")
+        and (
+            ((f.get("proposed_fix") or {}).get("args") or {}).get("track") == 0
+            or f["track"] == "Master"
+        )
+        for f in res["findings"]
     ):
         srcs = ", ".join(p["track_name"] for p in plans) or "the loud source tracks"
         notes.append(

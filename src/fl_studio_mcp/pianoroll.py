@@ -27,6 +27,40 @@ from .pyscript_gen import (
 )
 
 
+def _validate_notes(notes):
+    """Range-check raw note payloads (audit N2).
+
+    The MCP tool path is guarded by the PianoRollNote pydantic model; the
+    daemon's raw apply_notes op is NOT, so validate here -- the single
+    function both paths share. Rules mirror tools/pianoroll.PianoRollNote:
+    pitch int 0..127, time_bars >= 0, length_bars > 0, velocity 0..1 (or
+    absent). Raise ValueError with the index and reason BEFORE anything is
+    written."""
+    if not isinstance(notes, list):
+        raise ValueError("notes must be a list of objects")
+    for idx, n in enumerate(notes):
+        if not isinstance(n, dict):
+            raise ValueError(f"note {idx}: expected object, got {type(n).__name__}")
+        p = n.get("pitch")
+        try:
+            p = int(p)
+        except (TypeError, ValueError):
+            raise ValueError(f"note {idx}: pitch missing or not an integer ({p!r})")
+        if not 0 <= p <= 127:
+            raise ValueError(f"note {idx}: pitch {p} outside 0..127")
+        t = float(n.get("time_bars", 0.0))
+        l = float(n.get("length_bars", 1.0))
+        if t < 0:
+            raise ValueError(f"note {idx}: time_bars {t} < 0")
+        if l <= 0:
+            raise ValueError(f"note {idx}: length_bars {l} <= 0")
+        v = n.get("velocity")
+        if v is not None:
+            v = float(v)
+            if not 0.0 <= v <= 1.0:
+                raise ValueError(f"note {idx}: velocity {v} outside 0..1")
+
+
 def apply_notes(
     notes,
     mode="replace",
@@ -46,6 +80,31 @@ def apply_notes(
     If ``transpose`` (semitones) is set, writes a script that shifts pitch.
     Returns {ok, ..., script, triggered, focused, hint?}.
     """
+    # Audit N3: the branch chain below is first-match-wins, so a request
+    # carrying notes AND a transform silently DROPPED the notes and rewrote
+    # the whole roll instead. Multiple actions are now a hard error naming
+    # what clashed (previously the only tell was a reply shaped differently).
+    _actions = {
+        "notes": bool(notes),
+        "marker_add": marker_add is not None,
+        "marker_clear": bool(marker_clear),
+        "duplicate_bars": duplicate_bars is not None,
+        "velocity_ramp": velocity_ramp is not None,
+        "transpose": transpose is not None,
+        "quantize": quantize is not None,
+    }
+    _present = [k for k, v in _actions.items() if v]
+    if len(_present) > 1:
+        raise ValueError(
+            "apply_notes received multiple actions " + repr(_present)
+            + "; exactly one is allowed (they silently shadow each other)"
+        )
+    if notes and _present == ["notes"]:
+        # Audit N2: raw daemon-path notes bypassed the PianoRollNote pydantic
+        # model entirely (pitch 999 / negative bars reached the script, and the
+        # generated script CLEARS before adding). Validate before any write.
+        _validate_notes(notes)
+
     if marker_clear:
         path = write_marker_clear_script()
         result = {
@@ -131,7 +190,12 @@ def apply_notes(
             )
     except Exception as e:
         # Script is written regardless; trigger is best-effort.
+        # Audit N7: this used to keep ok=True with count=N -- the documented
+        # 'check count in the reply' law could not see that NOTHING reached
+        # FL. Honest shape: ok False, applied False, count kept for forensics.
         result["triggered"] = False
+        result["ok"] = False
+        result["applied"] = False
         result["error"] = f"{type(e).__name__}: {e}"
         result["hint"] = (
             f"Notes written but auto-trigger failed ({e}). Click the "

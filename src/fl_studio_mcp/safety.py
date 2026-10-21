@@ -237,7 +237,18 @@ def take_snapshot(bridge, scope):
         params = {"channel": parts[0]}
         if len(parts) > 1:
             params["pattern"] = parts[1]
-        return bridge.call(CMD_CHANNEL_GET_STEPS, params)
+        resp = bridge.call(CMD_CHANNEL_GET_STEPS, params)
+        # Audit C2/T5: a step snapshot is the ONLY source for rollback. If any
+        # read failed (controller reports read_errors) the snapshot is partial;
+        # restoring from it would overwrite real step data with nulls/defaults.
+        # Refuse the write instead of inventing a rollback.
+        if isinstance(resp, dict) and resp.get("read_errors"):
+            raise RuntimeError(
+                "step snapshot incomplete -- controller read failures: "
+                + str(resp.get("read_errors"))
+                + "; refusing write that could not be rolled back honestly"
+            )
+        return resp
     if kind == "pattern":
         return bridge.call(CMD_PATTERN_GET, {"index": int(arg)})
     if kind == "patterns_selected":
@@ -449,7 +460,32 @@ def safe_write(
             "ts": time.time(),
         }
     )
-    return {"ok": True, "change_id": entry["change_id"], "before": before, "after": after}
+    out = {"ok": True, "change_id": entry["change_id"], "before": before, "after": after}
+    # Audit T4: verify used to only drive re-issue retries -- an FL no-op was
+    # still reported ok:True, contradicting the layer's own docstring. Now an
+    # explicitly requested verification that fails flips the result to ok:False
+    # (the rollback entry stays logged; the caller can undo the attempt).
+    if verify is not None and isinstance(after, dict):
+        field, expected = verify
+        actual = after.get(field)
+        try:
+            if isinstance(expected, bool) or isinstance(actual, bool):
+                matches = bool(actual) == bool(expected)
+            elif isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+                matches = abs(float(actual) - float(expected)) <= 0.005
+            else:
+                matches = actual == expected
+        except Exception:
+            matches = actual == expected
+        out["verified"] = bool(matches)
+        if not matches:
+            out["ok"] = False
+            out["error"] = (
+                f"readback mismatch: {field}={actual!r} after write, expected "
+                f"{expected!r} -- FL did not apply the write (change_id "
+                f"{entry['change_id']} logged; rollback available)"
+            )
+    return out
 
 
 def safe_piano_roll_write(bridge, *, tool, params, apply):
@@ -466,7 +502,11 @@ def safe_piano_roll_write(bridge, *, tool, params, apply):
         return _dry_run_plan(tool, "piano_roll_apply", params)
     before = {"undo_backed": True, "note_readback_available": False}
     result = apply()
-    restore = {"command": protocol.CMD_GENERAL_UNDO, "params": {}}
+    # Audit N4: an undo-based restore used to be logged UNCONDITIONALLY --
+    # rolling back a run where nothing was applied (count:0 / trigger failed /
+    # write-only mode) pops whatever UNRELATED action sits on FL's undo stack.
+    applied = bool(result.get("ok")) and bool(result.get("triggered"))
+    restore = {"command": protocol.CMD_GENERAL_UNDO, "params": {}} if applied else None
     entry = {
         "tool": tool,
         "scope": "piano_roll",
@@ -477,16 +517,29 @@ def safe_piano_roll_write(bridge, *, tool, params, apply):
         "echo": result,
         "restore": restore,
         "ts": time.time(),
-        "rollback_note": "Uses FL Studio undo for the generated Piano Roll script.",
+        "rollback_note": (
+            "Uses FL Studio undo for the generated Piano Roll script."
+            if applied else
+            "Nothing was applied to FL (trigger did not run or failed) -- NO "
+            "rollback recorded; a general_undo here would pop an unrelated "
+            "user edit."
+        ),
     }
     entry = _log.append(entry)
-    return {
+    out = {
         "ok": True,
         "change_id": entry["change_id"],
         "before": before,
         "after": result,
-        "rollback": "fl_rollback_last_change uses FL Studio undo for this Piano Roll edit",
+        "applied": applied,
     }
+    if applied:
+        out["rollback"] = (
+            "fl_rollback_last_change uses FL Studio undo for this Piano Roll edit"
+        )
+    else:
+        out["rollback"] = None
+    return out
 
 
 def safe_write_group(bridge, *, tool, scope, writes, rollback_unit=None):

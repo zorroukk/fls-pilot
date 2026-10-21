@@ -213,33 +213,28 @@ def parse_root_note(val: str | int) -> int:
             return n
         raise ValueError(f"MIDI note {n} out of range [0, 127]")
 
-    m = re.match(r"^([A-G]#?|D[B]?|E[B]?|G[B]?|A[B]?|B[B]?)(-?\d+)$", val_str)
+    m = re.match(r"^([A-G]#?|[A-G]B?)(-?\d+)$", val_str)
     if not m:
         raise ValueError(f"Invalid note format: {val!r}. Use names like 'C5' or integers.")
 
     name, octave_str = m.groups()
     octave = int(octave_str)
 
-    flats = {"DB": "C#", "EB": "D#", "GB": "F#", "AB": "G#", "BB": "A#"}
-    if name in flats:
-        name = flats[name]
-
-    offsets = {
-        "C": 0,
-        "C#": 1,
-        "D": 2,
-        "D#": 3,
-        "E": 4,
-        "F": 5,
-        "F#": 6,
-        "G": 7,
-        "G#": 8,
-        "A": 9,
-        "A#": 10,
-        "B": 11,
-    }
-
-    base = offsets[name]
+    # Audit R3: the old flats map + exact-string offsets table made E#/B#
+    # raise KeyError (regex-legal but table-illegal) while Cb/Fb raised
+    # ValueError -- the error type depended on which enharmonic spelling the
+    # user typed. Semitone arithmetic is total and consistent:
+    #   letter base + accidental, enharmonics fold numerically
+    #   (E#4 == F4 == 65, B#4 == C5 == 72, Cb4 == B3 == 59).
+    LETTERS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+    if len(name) == 1:
+        base = LETTERS[name]
+    elif name.endswith("#"):
+        base = LETTERS[name[0]] + 1
+    elif name.endswith("B"):
+        base = LETTERS[name[0]] - 1
+    else:
+        raise ValueError(f"Unsupported note spelling: {val!r}")
     midi_num = base + octave * 12
 
     if 0 <= midi_num <= 127:

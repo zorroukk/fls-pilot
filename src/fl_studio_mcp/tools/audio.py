@@ -274,6 +274,9 @@ def audio_extract_melody(
             bpm /= 2.0
 
     raw = _segment_notes(f0, conf, times, min_note_sec)
+    # 4/4 assumption (audit T6): seconds-per-bar from tempo is only exact in
+    # x/4 meters; a 3/4 project's bar is 3 beats. Piano-roll writes get the
+    # time-signature-aware conversion GENERATED-side (pyscript_gen).
     barlen = 4.0 * 60.0 / bpm  # seconds per 4/4 bar
 
     def q(x):
@@ -299,7 +302,9 @@ def audio_extract_melody(
                     "pitch": pitch,
                     "time_bars": q(st / barlen),
                     "length_bars": max(q(dur / barlen), quantize),
-                    "velocity": 0.787,
+                    "velocity": 0.787,  # ADVISORY only: per-note velocity does
+                    # not persist through the pyscript path on 21.2.2 (see
+                    # known_pitfalls/velocity_flpianoroll).
                 }
             )
     kept_notes = [n for n in notes if n["kept"]]

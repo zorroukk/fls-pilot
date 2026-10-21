@@ -40,14 +40,37 @@ def _resolve_piano_roll_scripts_dir() -> str:
         personal = os.path.expandvars(str(raw))
         if personal:
             return os.path.join(personal, suffix)
-    except OSError:
+    except (OSError, ImportError):
+        # ModuleNotFoundError (non-Windows) is an ImportError, NOT an
+        # OSError -- an unguarded 'import winreg' used to crash module import on
+        # macOS/Linux entirely (audit N9; the repo ships an install_macos.sh).
         pass
     return os.path.expanduser(os.path.join("~/Documents", suffix))
 
 
 PIANO_ROLL_SCRIPTS_DIR = _resolve_piano_roll_scripts_dir()
+def _write_source(path, text):
+    """Write a generated .pyscript safely (audits N8/N9).
+
+    - utf-8: marker/pattern names carry non-ASCII (Norwegian 'På tide',
+      'Øvelse') -- the old encoding='ascii' raised UnicodeEncodeError and the
+      whole marker write failed.
+    - makedirs: FL only creates 'Piano roll scripts' on its own first script
+      save; a fresh profile / relocated user-data dir raised bare
+      FileNotFoundError.
+    - LF newlines: bytes stay stable across platforms for FL's interpreter."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
 APPLY_SCRIPT_NAME = "MCP_Apply.pyscript"
 
+# Manual-correct 0..1 mapping (MIDI 100) -- but MEASURED on 21.2.2 the
+# flpianoroll write path drops per-note velocity to FL's default 120
+# (known_pitfalls/velocity_flpianoroll). Do not promise dynamics through it.
 _DEFAULT_VELOCITY = 100 / 127.0
 
 _TEMPLATE = """# Script.Name = "MCP Apply"
@@ -57,12 +80,12 @@ _TEMPLATE = """# Script.Name = "MCP Apply"
 import flpianoroll as flp
 
 MODE = {mode!r}        # "replace" clears the pattern first; "append" adds
-NOTES = {notes!r}      # (pitch, time_bars, length_bars, velocity 0..1)
+NOTES = {notes!r}      # (pitch, time_bars, length_bars, velocity 0..1 -- advisory on 21.2.2, see velocity_flpianoroll)
 
 
 def _run():
     score = flp.score
-    bar = score.PPQ * 4
+    bar = int(round(score.PPQ * 4 * getattr(score, "tsnum", 4) / getattr(score, "tsden", 4)))  # audit N11: respect the project time signature
     if MODE == "replace":
         try:
             score.clearNotes(True)     # FL 25.2.5: positional, no keyword
@@ -119,8 +142,7 @@ def write_apply_script(notes, mode="replace", scripts_dir=None):
     scripts_dir = scripts_dir or PIANO_ROLL_SCRIPTS_DIR
     text = render_apply_script(notes, mode)
     path = os.path.join(scripts_dir, APPLY_SCRIPT_NAME)
-    with open(path, "w", encoding="ascii") as f:
-        f.write(text)
+    _write_source(path, text)
     return path
 
 
@@ -163,7 +185,7 @@ SNAP_ENDS = {ends!r}     # also snap note lengths to the grid
 
 def _run():
     score = flp.score
-    step = max(1, int(round(GRID_BARS * score.PPQ * 4)))
+    step = max(1, int(round(GRID_BARS * score.PPQ * 4 * getattr(score, "tsnum", 4) / getattr(score, "tsden", 4))))
     notes = []
     for i in range(score.noteCount):
         n = score.getNote(i)
@@ -208,8 +230,7 @@ def write_quantize_script(grid_bars, snap_ends=False, scripts_dir=None):
     scripts_dir = scripts_dir or PIANO_ROLL_SCRIPTS_DIR
     text = render_quantize_script(grid_bars, snap_ends)
     path = os.path.join(scripts_dir, APPLY_SCRIPT_NAME)
-    with open(path, "w", encoding="ascii") as f:
-        f.write(text)
+    _write_source(path, text)
     return path
 
 
@@ -274,8 +295,7 @@ def write_transpose_script(semitones: int, scripts_dir: str | None = None) -> st
     scripts_dir = scripts_dir or PIANO_ROLL_SCRIPTS_DIR
     text = render_transpose_script(semitones)
     path = os.path.join(scripts_dir, APPLY_SCRIPT_NAME)
-    with open(path, "w", encoding="ascii") as f:
-        f.write(text)
+    _write_source(path, text)
     return path
 
 
@@ -289,7 +309,7 @@ OFFSET_BARS = {offset_bars!r}
 
 def _run():
     score = flp.score
-    shift = int(round(OFFSET_BARS * score.PPQ * 4))
+    shift = int(round(OFFSET_BARS * score.PPQ * 4 * getattr(score, "tsnum", 4) / getattr(score, "tsden", 4)))
     if shift <= 0:
         return
     notes = []
@@ -325,8 +345,7 @@ def write_duplicate_script(offset_bars: float, scripts_dir: str | None = None) -
     scripts_dir = scripts_dir or PIANO_ROLL_SCRIPTS_DIR
     text = _DUPLICATE_TEMPLATE.format(offset_bars=float(offset_bars))
     path = os.path.join(scripts_dir, APPLY_SCRIPT_NAME)
-    with open(path, "w", encoding="ascii") as f:
-        f.write(text)
+    _write_source(path, text)
     return path
 
 
@@ -384,8 +403,7 @@ def write_velocity_ramp_script(start: float, end: float, scripts_dir: str | None
     scripts_dir = scripts_dir or PIANO_ROLL_SCRIPTS_DIR
     text = _VELOCITY_RAMP_TEMPLATE.format(start=float(start), end=float(end))
     path = os.path.join(scripts_dir, APPLY_SCRIPT_NAME)
-    with open(path, "w", encoding="ascii") as f:
-        f.write(text)
+    _write_source(path, text)
     return path
 
 
@@ -408,7 +426,7 @@ def _run():
     if marker_cls is None or not callable(add_marker):
         return
     m = marker_cls()
-    m.time = int(round(TIME_BARS * score.PPQ * 4))
+    m.time = int(round(TIME_BARS * score.PPQ * 4 * getattr(score, "tsnum", 4) / getattr(score, "tsden", 4)))
     if hasattr(m, "name"):
         m.name = NAME
     if hasattr(m, "mode"):
@@ -453,8 +471,7 @@ def write_marker_add_script(
         ts_den=ts_den if ts_den is None else int(ts_den),
     )
     path = os.path.join(scripts_dir, APPLY_SCRIPT_NAME)
-    with open(path, "w", encoding="ascii") as f:
-        f.write(text)
+    _write_source(path, text)
     return path
 
 
@@ -495,6 +512,5 @@ _go()
 def write_marker_clear_script(scripts_dir: str | None = None) -> str:
     scripts_dir = scripts_dir or PIANO_ROLL_SCRIPTS_DIR
     path = os.path.join(scripts_dir, APPLY_SCRIPT_NAME)
-    with open(path, "w", encoding="ascii") as f:
-        f.write(_MARKER_CLEAR_TEMPLATE)
+    _write_source(path, _MARKER_CLEAR_TEMPLATE)
     return path
