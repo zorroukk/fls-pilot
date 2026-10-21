@@ -33,15 +33,27 @@ Wire protocol (newline-delimited JSON, one object per line):
     -> {"op": "call", "cmd": str, "params": {...}|null, "timeout": float}
     <- {"ok": true, "data": ...}
        {"ok": false, "exc": "FLTimeout"|"FLNotRunning"|..., "error": str, "code": str}
+
+    -> {"op": "apply_notes", "notes": [...], "mode": "replace|append",
+        "trigger": bool, "channel": int|null, "pattern": int|null, ...}
+       NOTE: apply_notes fields are TOP LEVEL on the request -- they are NOT
+       nested under "params" the way {"op":"call"} payloads are. A request
+       that nests them is REFUSED (an accidental empty replace-mode write
+       once cleared a user's piano roll; see known_pitfalls).
+       If the environment variable FLSTUDIO_MCP_DAEMON_TOKEN is set, every
+       request must carry a matching "token" field.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
+import socket
 import socketserver
 import threading
+import time
 
 from . import __version__, protocol
 from .connection import (
@@ -92,15 +104,86 @@ def _reset_bridge() -> None:
             logger.exception("bridge close during reset raised (ignored)")
 
 
+_last_notrunning_reset = 0.0
+_NOTRUNNING_RESET_COOLDOWN = 10.0
+
+
+def _selfheal_after_notrunning() -> bool:
+    """Rate-limited bridge reset on FLNotRunning (audit D2).
+
+    The documented field failure is 'the MIDI reader thread dies while the
+    TCP side keeps answering' (runbook law 4; Wiki/FL Studio 2026-09-20):
+    health correctly reports alive=false, but every command just returned
+    FLNotRunning against the same poisoned singleton, so the daemon was a
+    permanent zombie until a human restarted the process. Resetting the
+    bridge makes the NEXT request re-enumerate ports and re-create the
+    reader thread. Cooldown bounds port re-enumeration cost when FL Studio
+    genuinely is closed.
+    """
+    global _last_notrunning_reset
+    now = time.monotonic()
+    if now - _last_notrunning_reset < _NOTRUNNING_RESET_COOLDOWN:
+        return False
+    _last_notrunning_reset = now
+    logger.warning(
+        "FLNotRunning with a previously-live bridge: resetting so the next "
+        "request re-attaches the MIDI reader (rate-limited to once per "
+        f"{_NOTRUNNING_RESET_COOLDOWN:.0f}s)"
+    )
+    _reset_bridge()
+    return True
+
+
+def _unauthorized(req: dict) -> dict | None:
+    """Optional shared-secret gate (audit N12): with FLSTUDIO_MCP_DAEMON_TOKEN
+    set, requests without a matching token are refused. Unset keeps the
+    historical loopback trust model."""
+    expected = os.environ.get("FLSTUDIO_MCP_DAEMON_TOKEN")
+    if not expected:
+        return None
+    got = str(req.get("token") or "")
+    if not hmac.compare_digest(got, expected):
+        return {
+            "ok": False,
+            "exc": "Error",
+            "error": "missing or invalid daemon token",
+            "code": "unauthorized",
+        }
+    return None
+
+
 def _handle_request(req: dict) -> dict:
+    denied = _unauthorized(req)
+    if denied is not None:
+        return denied
+
     op = req.get("op")
 
     if op == "health":
         try:
             bridge = _get_bridge()
-        except FLPortMissing as e:
-            return {"alive": False, "heartbeat_age": None, "error": str(e)}
-        return {"alive": bridge.is_alive(), "heartbeat_age": bridge.heartbeat_age()}
+        except (FLPortMissing, OSError) as e:
+            return {
+                "alive": False,
+                "heartbeat_age": None,
+                "error": f"{type(e).__name__}: {e}",
+            }
+        except Exception as e:  # pragma: no cover - defensive (audit D6)
+            logger.exception("health: unexpected bridge-open failure")
+            return {
+                "alive": False,
+                "heartbeat_age": None,
+                "error": f"{type(e).__name__}: {e}",
+            }
+        try:
+            return {"alive": bridge.is_alive(), "heartbeat_age": bridge.heartbeat_age()}
+        except Exception as e:  # pragma: no cover - defensive (audit D6)
+            logger.exception("health: bridge probe raised")
+            return {
+                "alive": False,
+                "heartbeat_age": None,
+                "error": f"{type(e).__name__}: {e}",
+            }
 
     if op == "call":
         command = req.get("cmd")
@@ -117,7 +200,16 @@ def _handle_request(req: dict) -> dict:
                 "code": getattr(e, "code", "error"),
             }
         except FLNotRunning as e:
-            return {"ok": False, "exc": "FLNotRunning", "error": str(e)}
+            # Audit D2: healing used to happen only for raw OSError/RuntimeError;
+            # the documented reader-thread death (heartbeat stale, TCP alive)
+            # reached this branch and left a permanent zombie daemon.
+            healed = _selfheal_after_notrunning()
+            return {
+                "ok": False,
+                "exc": "FLNotRunning",
+                "error": str(e),
+                "healed": healed,
+            }
         except FLTimeout as e:
             return {"ok": False, "exc": "FLTimeout", "error": str(e)}
         except FLPortMissing as e:
@@ -144,6 +236,41 @@ def _handle_request(req: dict) -> dict:
         # Daemon-side note authoring: generate the .pyscript with notes baked
         # in, write it, force-focus FL, fire Ctrl+Alt+Y. Runs here (normal
         # process) so it works even when the MCP server is MSIX-sandboxed.
+        #
+        # Envelope guards (audit N1 -- the recorded field WIPE incident,
+        # Wiki/MicroFreak 2026-09-20): apply_notes takes its payload at the
+        # REQUEST TOP LEVEL. A mis-nested {"params": {...}} request used to
+        # resolve to notes=[], mode='replace', trigger=True and CLEAR the
+        # piano roll while answering ok:true. Same for an actionless request.
+        if isinstance(req.get("params"), dict):
+            return {
+                "ok": False,
+                "exc": "Error",
+                "code": "envelope-misnested",
+                "error": (
+                    'apply_notes fields go at the request TOP LEVEL, not under '
+                    '"params" (that envelope belongs to {"op":"call"}). '
+                    "Refusing instead of executing an empty replace-mode write."
+                ),
+            }
+        _action_keys = (
+            "notes", "quantize", "transpose", "duplicate_bars",
+            "velocity_ramp", "marker_add", "marker_clear",
+        )
+        has_action = any(
+            req.get(k) not in (None, False, [], {}, "") for k in _action_keys
+        )
+        if not has_action and not req.get("allow_empty_clear"):
+            return {
+                "ok": False,
+                "exc": "Error",
+                "code": "empty-payload",
+                "error": (
+                    "apply_notes received no actionable payload (no notes, no "
+                    "transform, no marker action). A clear is only executed via "
+                    "an explicit allow_empty_clear:true."
+                ),
+            }
         try:
             trigger = req.get("trigger", True)
             ensured = None
@@ -197,7 +324,18 @@ class _Handler(socketserver.StreamRequestHandler):
                 except Exception as e:
                     resp = {"ok": False, "exc": "Error", "error": f"bad json: {e}"}
                 else:
-                    resp = _handle_request(req)
+                    # Audit D6: an unexpected raise out of _handle_request used
+                    # to close the connection with zero bytes of JSON, hiding
+                    # the real cause behind a transport-shaped error.
+                    try:
+                        resp = _handle_request(req)
+                    except Exception as e:  # pragma: no cover - defensive
+                        logger.exception("handler: _handle_request raised")
+                        resp = {
+                            "ok": False,
+                            "exc": "Error",
+                            "error": f"{type(e).__name__}: {e}",
+                        }
                 self.wfile.write((json.dumps(resp) + "\n").encode("utf-8"))
                 self.wfile.flush()
         except Exception:  # pragma: no cover - defensive
@@ -207,8 +345,21 @@ class _Handler(socketserver.StreamRequestHandler):
 
 
 class _Server(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
+    # NOTE: on Windows SO_REUSEADDR means 'may bind over a LIVE listener', not
+    # 'reuse a TIME_WAIT socket' -- with it a second daemon silently binds the
+    # port a running daemon owns, becomes a phantom (clients still answer to
+    # the first) and opens DUPLICATE WinMM handles on the FLStudioMCP ports,
+    # a documented driver-graph corruption trigger (audit D1).
+    # SO_EXCLUSIVEADDRUSE is the Windows-correct posture, but the two options
+    # are MUTUALLY EXCLUSIVE: setting exclusive while reuse is on fails with
+    # WSAEINVAL (10022), so on Windows we never set reuse at all.
+    allow_reuse_address = os.name != "nt"
     daemon_threads = True
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def _default_log_dir() -> str:
@@ -257,8 +408,29 @@ def main() -> None:
     host = os.environ.get("FLSTUDIO_MCP_TCP_HOST", DEFAULT_TCP_HOST)
     port = int(os.environ.get("FLSTUDIO_MCP_TCP_PORT", DEFAULT_TCP_PORT))
 
-    # Pre-open so port problems surface in the log immediately. Non-fatal:
-    # health/call retry until the ports exist.
+    # Bind FIRST (audit D10): a MIDI-open failure must never stop the daemon
+    # from serving health -- 'daemon down' and 'daemon up, MIDI unopenable'
+    # have different cures, and probes/watchdogs depend on telling them apart.
+    try:
+        server = _Server((host, port), _Handler)
+    except OSError as e:
+        logger.error(
+            "cannot bind %s:%d -- %s. If the error is WSAEADDRINUSE another "
+            "process owns the port: netstat -ano | findstr :%d  (a LISTENING "
+            "127.0.0.1 port is NOT proof of a working bridge -- use "
+            "scripts/stack_health_probe.py; a second daemon used to bind here "
+            "silently as a phantom, see known_pitfalls).",
+            host, port, e, port,
+        )
+        raise SystemExit(1) from e
+    logger.info(
+        "fl-studio-mcp daemon %s (pid %d) listening on %s:%d",
+        __version__, os.getpid(), host, port,
+    )
+
+    # Pre-open the bridge so port problems surface in the log immediately.
+    # Non-fatal: health/call retry until the ports exist (audit D10: any
+    # exception type must degrade to 'serving health', never kill startup).
     try:
         _get_bridge()
         logger.info("MIDI bridge open.")
@@ -268,9 +440,13 @@ def main() -> None:
             "Create the loopMIDI ports and start FL; the daemon "
             "will pick them up on the next request."
         )
+    except Exception:
+        logger.exception(
+            "MIDI bridge open failed at startup -- serving health-only until "
+            "the next request retries the attach (driver-graph corruption and "
+            " vanished-port OSError states are the documented causes)."
+        )
 
-    server = _Server((host, port), _Handler)
-    logger.info("fl-studio-mcp daemon %s listening on %s:%d", __version__, host, port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:  # pragma: no cover

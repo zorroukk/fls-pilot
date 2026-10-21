@@ -31,8 +31,10 @@ import platform
 import secrets
 import string
 
-# Bump when the wire format changes incompatibly. Server and FL refuse to
-# talk to a mismatched peer.
+# Bump when the wire format changes incompatibly. fl_ping reports
+# protocol_version_match so a mismatched peer is LOUD (an older comment
+# claimed both sides hard-refuse each other; they never did -- audit N/D
+# sweep 2026-10-21 corrected the claim and wired the actual check).
 PROTOCOL_VERSION = 2
 
 # How long the server waits for a heartbeat before declaring FL not running.
@@ -43,6 +45,42 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 
 # How often the FL controller emits a heartbeat SysEx.
 HEARTBEAT_INTERVAL_SECONDS = 0.5
+
+# ---------------------------------------------------------------------------
+# FL Studio version assurance (audits V1/V2/C12)
+# ---------------------------------------------------------------------------
+# Builds on which parts of this bridge have LIVE evidence, by evidence owner:
+#   21.2.2 build 3914 (Windows)  -- this fork's hardening era: daemon, chunked
+#       protocol v42+, apply_notes path, step/channel controllers, the
+#       MicroFreak hardware lane batteries.
+#   25.2.5 build 5055            -- INHERITED upstream evidence: EQ/limiter/
+#       Proc-3/reverb calibration curves and the original tool surface were
+#       verified there upstream; NOT re-run by this fork.
+# Anything else is unmeasured here: most tools ride scripting APIs documented since
+# v1-v13, but treat unprobe-guarded paths as unverified. See
+# docs/FL_VERSION_SUPPORT.md (generated capability table lives beside it).
+KNOWN_GOOD_FL_VERSION_PREFIXES = ("21.2.", "25.2.")
+
+# The controller build marker this server expects. Bump TOGETHER with the
+# "build" field in fl_controller/.../device_FLStudioMCP.py; fl_ping then
+# flags a stale deployed script loudly instead of the stack silently running
+# against dead bytes (audit C12, vault log 2026-09-05 02:50).
+EXPECTED_CONTROLLER_BUILD = "channels-v45"
+
+
+def fl_version_assurance(fl_version) -> dict:
+    """Classify a controller-reported FL version against the measured builds."""
+    v = str(fl_version or "")
+    measured = any(p in v for p in KNOWN_GOOD_FL_VERSION_PREFIXES)
+    out = {"fl_version_measured": measured}
+    if not measured:
+        out["fl_version_warning"] = (
+            f"FL version {v!r} is outside the live-measured builds "
+            f"{KNOWN_GOOD_FL_VERSION_PREFIXES}. Most features ride documented "
+            "APIs; probe-guarded tools degrade with named errors, but treat "
+            "the rest as unproven on this build -- see docs/FL_VERSION_SUPPORT.md."
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +277,15 @@ def encode_frames(direction: int, request_id: str, payload: dict) -> list[bytes]
     body = encode_message(direction, request_id, payload)
     if len(body) <= _MAX_CHUNK_BODY:
         return [body]
+    if len(body) > _MAX_REASSEMBLY_BYTES:
+        # Audit D11: previously oversized bodies were encoded happily and then
+        # silently discarded by the RECEIVER at its reassembly cap -- the
+        # sender just timed out on a false 'FL Studio did not respond'.
+        raise ValueError(
+            f"payload of {len(body)} B exceeds the chunk reassembly cap "
+            f"({_MAX_REASSEMBLY_BYTES} B); it would be dropped on the wire. "
+            "Paginate this result at the tool level instead."
+        )
     n = -(-len(body) // _MAX_CHUNK_BODY)  # ceil
     frames = []
     for seq in range(n):
@@ -263,6 +310,9 @@ class ChunkReassembler:
     def __init__(self) -> None:
         self._buf = bytearray()
         self._expect = 0  # next seq we want within the in-progress message
+        # Audit D11: record WHY a message was discarded so receivers can log
+        # a real cause instead of pretending the message never existed.
+        self.last_drop: dict | None = None
 
     def reset(self) -> None:
         self._buf = bytearray()
@@ -280,11 +330,23 @@ class ChunkReassembler:
         # Out-of-order or gap: a fresh seq==0 restarts cleanly; anything else
         # mid-stream is unrecoverable on this transport, so drop and resync.
         if seq != self._expect:
+            if self._buf:
+                self.last_drop = {
+                    "kind": "resync",
+                    "wanted_seq": self._expect,
+                    "got_seq": seq,
+                    "bytes_buffered": len(self._buf),
+                }
             self.reset()
             if seq != 0:
                 return None
         self._buf.extend(data[_CHUNK_HEADER_LEN:])
         if len(self._buf) > _MAX_REASSEMBLY_BYTES:
+            self.last_drop = {
+                "kind": "overflow",
+                "bytes_buffered": len(self._buf),
+                "cap": _MAX_REASSEMBLY_BYTES,
+            }
             self.reset()
             return None
         self._expect = (seq + 1) & 0x7F
