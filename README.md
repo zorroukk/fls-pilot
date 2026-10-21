@@ -6,21 +6,32 @@
 
 **Control FL Studio with any MCP-compatible LLM: AI mixing, composition, and mix diagnosis through natural language.**
 
-![version](https://img.shields.io/badge/version-2.0.0-blue)
+![version](https://img.shields.io/badge/version-2.1.0-blue)
 ![status](https://img.shields.io/badge/status-stable-green)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.10+-blue)
 ![Windows](https://img.shields.io/badge/Windows-0078D6?style=flat&logo=windows&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-000000?style=flat&logo=apple&logoColor=white)
-![FL Studio](https://img.shields.io/badge/FL%20Studio-2025%2B-orange)
+![FL Studio](https://img.shields.io/badge/FL%20Studio-21.2.2%20verified%20%7C%2025.x%20upstream-orange)
 
 ![The LLM assistant diagnosing and fixing a mix in FL Studio](docs/demo.gif)
+
+> **This is a hardening fork.** It descends from
+> [rosasynthesiz/flstudio-mcp](https://github.com/rosasynthesiz/flstudio-mcp)
+> (MIT, upstream) and adds local FL-21.2 hardening: daemon self-heal and
+> bridge-truth watchdog, chunked-SysEx transport fixes, piano-roll wipe
+> guards, controller crash guards, honest step/velocity readback, and the
+> six-lane audit sweep of 2026-10-21
+> ([AUDIT_2026-10-21.md](docs/AUDIT_2026-10-21.md), v2.1.0 changelog entry).
+> Upstream has independently evolved its own feature set; feature parity is
+> **not** claimed, and this fork's live evidence is FL Studio **21.2.2 b3914**
+> (see [FL_VERSION_SUPPORT.md](docs/FL_VERSION_SUPPORT.md)).
 
 *The LLM assistant diagnosing and fixing a mix in FL Studio through natural language.*
 
 ## Overview
 
-flstudio-mcp is a Model Context Protocol (MCP) server that lets any MCP client (like Claude Desktop, ChatGPT, or Cursor) drive FL Studio 2025 directly — the mixer, plugins, piano roll, routing, and project — from plain-language requests. Ask for a mix diagnosis, a vocal chain, a chord progression in a particular scale, or a full arrangement, and the LLM assistant carries it out through FL's scripting API and a set of calibrated, safety-checked tools.
+flstudio-mcp is a Model Context Protocol (MCP) server that lets any MCP client (like Claude Desktop, ChatGPT, or Cursor) drive FL Studio directly — the mixer, plugins, piano roll, routing, and project — from plain-language requests. Ask for a mix diagnosis, a vocal chain, a chord progression in a particular scale, or a full arrangement, and the LLM assistant carries it out through FL's scripting API and a set of calibrated, safety-checked tools.
 
 **Key upgrades in v2.0.0:**
 
@@ -154,12 +165,21 @@ These are properties of FL Studio's scripting API, stated plainly:
 ## Requirements
 
 - **Windows 10/11** (tested on Windows 11) or **macOS 12+** (Intel & Apple Silicon)
-- **Last live-verified FL Studio build:** Producer Edition v25.2.5, build
-  5055, with controller build marker `channels-v38`. The current source
-  controller marker is `channels-v39` and should be live-smoked after reload.
-  FL Studio 20.7+ has the required MIDI scripting foundation, but individual
-  API behavior can be build-dependent; use `fl_transport(action="ping")` and
-  the live smoke/probe scripts before relying on a new FL build for writes.
+- **FL Studio build evidence (read this before trusting any write):**
+  - This fork's hardening is **live-verified on Producer Edition v21.2.2,
+    build 3914** (Windows) — that is the only build this fork has measured;
+    the controller build marker is `channels-v45`.
+  - The curve/calibration tables inherited from upstream were verified on
+    **v25.2.5, build 5055** upstream; they were NOT re-run here.
+  - Everything else is **UNVERIFIED**. 114 of 166 tools ride scripting APIs
+    the Image-Line manual documents since MIDI scripting v1–v13 and are
+    expected to work broadly; a small set depends on manual-silent APIs and
+    degrades with named `api_unavailable` errors.
+  - `fl_transport(action="ping")` now CLASSIFIES the build
+    (`fl_version_measured`, `protocol_version_match`,
+    `controller_build_stale`) and warns instead of silently assuming. Full
+    matrix + evidence classes: [docs/FL_VERSION_SUPPORT.md](docs/FL_VERSION_SUPPORT.md)
+    and the machine-generated [docs/capability_table.generated.md](docs/capability_table.generated.md).
 - **Claude Desktop** or **ChatGPT Desktop** (or any MCP client)
 - **Python 3.10+**
 - Virtual MIDI ports:

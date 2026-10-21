@@ -51,5 +51,12 @@
     "toolbar visual agreement for loop mode (readback-only confirmation so far)",
     "STILL UNTESTED: daemon-killed-mid-hold OnIdle auto-release proof (deferred to avoid routing churn 2026-09-20)"
   ],
-  "next_recommended_action": "one-time api_probe dir('channels') for midiNoteOff presence; daemon-kill auto-release test on a night where churn is acceptable; raise to measured_repeated after second clean battery"
+  "next_recommended_action": "one-time api_probe dir('channels') for midiNoteOff presence; daemon-kill auto-release test on a night where churn is acceptable; raise to measured_repeated after second clean battery",
+  "source_method": "karl-andres static audit 2026-09-19; LIVE battery 2026-09-20 (project projecthermes1.flp, FL21.2.2.3914, v44)",
+  "context": "Live Audition APIs availability matrix",
+  "observation": "",
+  "result": "measured_once - documented in this entry and enforced by code guards where applicable",
+  "tested_values": [
+    "FL Producer Edition v21.2.2 build 3914, controller channels-v44"
+  ]
 }

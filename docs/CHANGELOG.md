@@ -2,6 +2,94 @@
 
 This changelog is curated from the repository commit history and project documentation. It focuses on user-visible behavior, safety contracts, compatibility changes, and known FL Studio API boundaries. Routine formatting, metadata-only refreshes, one-off verification notes, and transient release housekeeping are intentionally omitted unless they change the public product contract.
 
+## v2.1.0 - Post-audit hardening (2026-10-21)
+
+**Status:** tested offline (196 pre-existing tests + new regression tests green);
+live device re-verification owed for the items marked below.
+
+An independent six-lane audit of this fork (daemon/transport, FL controller
+script, agent-facing contract, tools layer, publish-readiness, FL-version
+lock-in) produced ~73 findings, most with executed red reproductions. Full
+writeup and remaining work: [AUDIT_2026-10-21.md](AUDIT_2026-10-21.md).
+
+### Data-safety fixes (the ones that could destroy work)
+
+- **Piano-roll wipe guard.** The raw daemon `apply_notes` op again refuses
+  mis-nested (`params`-wrapped) payloads and actionless requests; an empty
+  clear now requires an explicit `allow_empty_clear: true`.
+- **Step-snapshot honesty.** Controller reads return `null` + `read_errors`
+  instead of plausible fabricated defaults, and the server refuses to
+  snapshot/rollback from an incomplete read (a failed read used to make
+  "rollback" write invented rows over real step data).
+- **`fl_apply_bus_layout` validates.** Master (`bus_track=0`), self-routes,
+  duplicate and contradictory source assignments are rejected before any
+  write (they used to emit `src->0 ON` then `OFF`, silently killing master
+  sends behind `ok: true`).
+- **Piano-roll rollback is conditional.** An undo restore is only logged when
+  something actually reached FL; write-only/failed runs no longer leave an
+  undo entry that pops an unrelated user edit.
+- **`safe_write` honours `verify`.** An explicitly requested readback that
+  disagrees now returns `ok: false` with the mismatch instead of `ok: true`.
+
+### Transport and daemon reliability
+
+- **Bridge-truth self-heal.** `FLNotRunning` (the documented reader-thread
+  death: heartbeat stale, TCP alive) now triggers a rate-limited bridge reset,
+  and the error text names the daemon instead of blaming FL's settings.
+- **Exclusive bind on Windows.** A second daemon can no longer bind over a
+  live listener as a phantom (`SO_EXCLUSIVEADDRUSE`); bind failure is logged
+  with the cure, and the daemon now logs its PID.
+- **Chunked-message serialization.** Frames of one message can no longer
+  interleave with another caller's (FL dropped the in-flight command behind a
+  false "FL Studio did not respond").
+- **Honest error taxonomy.** Connect-failure vs busy-timeout vs malformed
+  reply are distinct; a busy daemon no longer reports "start the daemon".
+- **Atomic MIDI open** (no leaked output handle on a failed input open),
+  health never drops the connection on an OSError, startup binds before the
+  MIDI pre-open so a MIDI failure cannot kill daemon logging, and oversized
+  payloads are rejected at encode time instead of vanishing on the wire.
+- **`scripts/watchdog.py`** (new): keys on probe exit codes — bridge-dead
+  strikes restart the daemon; a listener alone is no longer treated as health.
+
+### Contract and controller
+
+- Raw note payloads are validated (pitch/time/length/velocity) before any
+  script write; multiple conflicting actions in `apply_notes` are rejected;
+  trigger failures return `ok: false` + `applied: false`.
+- Dry-run no longer retargets the Piano Roll editor (it was discovered to
+  mutate project state).
+- Controller: `-Infinity` dB from a fader at zero no longer kills the handler
+  (sanitized + guarded sends), failed preview-note releases retry and log,
+  `OnDeInit` releases held notes, `-inf`/NaN can no longer be created by the
+  pattern reset, `midi.REC_Tempo`/time-signature APIs degrade with named
+  `api_unavailable`, and `jumpToPattern(<1)` is rejected (FL 26.x crashes).
+- Step-parameter writes use the same 1-based pattern number as the read path
+  (LIVE re-verification owed), and `midiNoteOn`'s global-vs-local channel
+  index is resolved explicitly.
+
+### FL-version honesty (new)
+
+- `fl_ping` classifies the build against measured prefixes, checks protocol
+  and controller-marker drift, and reports the controller's own MIDI port.
+- New docs: [FL_VERSION_SUPPORT.md](FL_VERSION_SUPPORT.md) +
+  machine-generated [capability_table.generated.md](capability_table.generated.md)
+  (114/166 tools on manual-documented APIs; 7 manual-silent; evidence classes).
+- README's stale "last verified v25.2.5 / marker v38-v39" pin replaced with the
+  fork's actual evidence matrix.
+
+### Housekeeping
+
+- `.gitignore` now covers `runtime-logs/`, `scratch/`, `*.log*` (both trees
+  held absolute host paths and were one `git add .` away from being committed).
+- Machine identifiers/paths scrubbed from tracked knowledgebase + docs; KB
+  author fields anonymized.
+- The 10 argv-driven files previously parked in `tests/` moved to
+  `scripts/probes/legacy/`; CI now gates on `pytest --collect-only`.
+- Per-note velocity is now documented as advisory through the pyscript path
+  (measured: lands as FL's default 120 on 21.2.2) in tool descriptions and
+  `knowledgebase/known_pitfalls/velocity_flpianoroll.md`.
+- Windows installer resolves FL's real user-data root via the shell-folders
+  registry and byte-verifies the deployed controller script after copy.
 ## v2.0.0-stable - Architecture Foundation, Tool Efficiency, and Safety-First Production Workflows
 
 **Release date:** 2026-06-07  

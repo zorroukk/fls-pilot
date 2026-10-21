@@ -1,7 +1,7 @@
 # FL 21.2.2 Re-broadcasts Enabled MIDI Inputs to All Numbered Outputs (storm hazard)
 
 - **Date:** 2026-09-20
-- **Agent/Author:** Hermes (experimental) / Nicholas
+- **Agent/Author:** field forensics (this fork)
 - **Topic:** Every enabled MIDI **input** row in FL 21.2.2 re-broadcasts received traffic out to **all numbered outputs**, closing feedback rings through loopMIDI + external-hardware relays. Outputs have no enable toggle — the port number IS the binding; blank = untargetable.
 - **Affected File/API:** FL `Options > MIDI settings` (both tables), `mf_mcp.relay` lane, loopMIDI topology.
 - **Context:** First live relay test of the rebuilt MicroFreak lane. Relay attached to the *shared base* `loopMIDI Port` (which FL had as an enabled input and which also carries visualizer traffic). Within 60 s the sendlog recorded 85,553 relay note events (~1,670 ev/s, default velocity 64) with the Freak's keys "pressed by themselves". No FL transport was running and nothing was played.
