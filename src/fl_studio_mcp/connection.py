@@ -128,6 +128,10 @@ class FLBridge:
         self.default_timeout = default_timeout
 
         self._lock = threading.Lock()
+        # Wire-serialization lock: a multi-frame (chunked SysEx) message must
+        # reach FL contiguously. Interleaved frames from concurrent callers are
+        # resynced-and-dropped by the controller's reassembler (audit D3).
+        self._send_lock = threading.Lock()
         self._pending: dict[str, _Slot] = {}
         self._last_heartbeat: float = 0.0
         self._heartbeat_payload: dict | None = None
@@ -161,8 +165,18 @@ class FLBridge:
                 "or set FLSTUDIO_MCP_PORT_FROM_FL to an existing port name."
             )
         logger.info("Opening MIDI ports: out=%r, in=%r", out_match, in_match)
-        self._out_port = mido.open_output(out_match)
-        self._in_port = mido.open_input(in_match, callback=self._on_midi)
+        # Atomic open (audit D5): never leave a live output handle behind when
+        # the input open fails -- duplicate WinMM handles on a port FL already
+        # holds endpoints on is a documented driver-graph corruption trigger.
+        out_port = mido.open_output(out_match)
+        try:
+            in_port = mido.open_input(in_match, callback=self._on_midi)
+        except Exception:
+            with contextlib.suppress(Exception):
+                out_port.close()
+            raise
+        self._out_port = out_port
+        self._in_port = in_port
         self._opened = True
 
     def close(self) -> None:
@@ -203,8 +217,26 @@ class FLBridge:
             # First call after open(): give FL a moment to send a heartbeat.
             self.wait_for_heartbeat()
         if not self.is_alive():
+            if self._last_heartbeat != 0.0:
+                # A heartbeat was observed BEFORE and has now gone stale:
+                # documented field state is 'the daemon MIDI reader thread
+                # died (or FL was restarted) while the TCP side keeps
+                # answering' -- FL Studio itself is usually fine (runbook
+                # law 4; the fix is restarting the daemon, not F10 re-tinkering).
+                raise FLNotRunning(
+                    f"FL Studio controller heartbeat went stale (last beat "
+                    f"{self.heartbeat_age():.1f}s ago). The script WAS alive "
+                    "earlier, so first suspect the bridge, not FL Studio: "
+                    "restart the fl-studio-mcp daemon (its MIDI reader thread "
+                    "can die while the TCP side keeps answering). Only if a "
+                    "fresh daemon does not recover the heartbeat: check that "
+                    "FL Studio is open, the FLStudioMCP controller is loaded "
+                    "(View > Script output shows '[FLStudioMCP] Ready'), and "
+                    "no F10 port renumber killed the script."
+                )
             raise FLNotRunning(
-                "FL Studio controller is not responding. Verify:\n"
+                "FL Studio controller has never sent a heartbeat in this "
+                "daemon session. Verify:\n"
                 "  1. FL Studio is open.\n"
                 "  2. FLStudioMCP is selected as the Controller type for the "
                 "loopMIDI input port in Options > MIDI Settings.\n"
@@ -232,8 +264,9 @@ class FLBridge:
             self._pending[request_id] = slot
 
         try:
-            for frame in protocol.encode_frames(DIR_REQUEST, request_id, request):
-                self._out_port.send(mido.Message("sysex", data=frame))
+            with self._send_lock:
+                for frame in protocol.encode_frames(DIR_REQUEST, request_id, request):
+                    self._out_port.send(mido.Message("sysex", data=frame))
             if not slot.event.wait(timeout or self.default_timeout):
                 raise FLTimeout(
                     f"FL Studio did not respond to {command!r} within "
@@ -309,6 +342,14 @@ class FLBridge:
         # and heartbeat frames pass straight through; chunk frames return
         # None until the message is complete (heartbeats may interleave).
         data = self._reassembler.feed(bytes(msg.data))
+        drop = self._reassembler.last_drop
+        if drop is not None:
+            self._reassembler.last_drop = None
+            logger.error(
+                "inbound chunked message DISCARDED (%s) -- the waiting "
+                "caller will time out with FLTimeout, but THIS is the real "
+                "cause: %r", drop.get("kind"), drop,
+            )
         if data is None:
             return
         decoded = protocol.decode_message(data)
@@ -370,18 +411,52 @@ class TCPBridge:
     # -- transport -----------------------------------------------------------
 
     def _rpc(self, req: dict, timeout: float) -> dict:
-        with self._lock, socket.create_connection((self.host, self.port), timeout=timeout) as s:
-            s.settimeout(timeout)
-            s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-            buf = b""
-            while b"\n" not in buf:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
+        # Optional daemon shared secret (mirrors daemon._unauthorized).
+        tok = os.environ.get("FLSTUDIO_MCP_DAEMON_TOKEN")
+        if tok:
+            req = {**req, "token": tok}
+        # Separate connect failure, busy timeout and malformed replies
+        # (audits D4/D7): a down daemon, a slow daemon and a daemon answering
+        # garbage must produce distinct, honest errors -- conflating them
+        # turned every busy moment into a 'start the daemon' false remedy.
+        with self._lock:
+            try:
+                s = socket.create_connection((self.host, self.port), timeout=timeout)
+            except OSError as e:
+                raise self._daemon_unreachable(e) from e
+            try:
+                with s:
+                    s.settimeout(timeout)
+                    s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+                    buf = b""
+                    while b"\n" not in buf:
+                        try:
+                            chunk = s.recv(4096)
+                        except socket.timeout as e:
+                            raise FLTimeout(
+                                f"the daemon at {self.host}:{self.port} accepted "
+                                f"the connection but did not answer within "
+                                f"{timeout:.1f}s -- it is up and busy, or its "
+                                "bridge is wedged. The right next step is an "
+                                "op:health check, NOT a daemon restart."
+                            ) from e
+                        if not chunk:
+                            break
+                        buf += chunk
+            except FLTimeout:
+                raise
+            except OSError as e:
+                raise self._daemon_unreachable(e) from e
         if not buf:
             raise FLBridgeError("daemon closed the connection without replying")
-        return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+        line = buf.split(b"\n", 1)[0]
+        try:
+            return json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise FLBridgeError(
+                f"daemon answered with malformed JSON ({type(e).__name__}); "
+                f"first bytes: {line[:60]!r}"
+            ) from e
 
     def _daemon_unreachable(self, exc: Exception) -> FLPortMissing:
         return FLPortMissing(
@@ -395,15 +470,17 @@ class TCPBridge:
     def heartbeat_age(self) -> float | None:
         try:
             resp = self._rpc({"op": "health"}, timeout=5.0)
-        except OSError:
-            # Daemon down -> report "no heartbeat" so fl_ping degrades cleanly.
+        except (OSError, FLBridgeError):
+            # Daemon down/unreachable/busy -> report "no heartbeat" so fl_ping
+            # degrades cleanly (FLPortMissing and FLTimeout are FLBridgeError
+            # subclasses since the D4/D7 _rpc rewrite).
             return None
         return resp.get("heartbeat_age")
 
     def is_alive(self) -> bool:
         try:
             resp = self._rpc({"op": "health"}, timeout=5.0)
-        except OSError:
+        except (OSError, FLBridgeError):
             return False
         return bool(resp.get("alive"))
 
