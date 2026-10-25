@@ -59,7 +59,7 @@ audio = [
 #   pip install -e .[audio,audio-accurate]
 # Without it, fl_extract_melody falls back to the lighter pyin engine.
 audio-accurate = [
-    "torch>=2.0",
+    "torch>=2.14.1",
     "torchcrepe>=0.0.23",
 ]
 
